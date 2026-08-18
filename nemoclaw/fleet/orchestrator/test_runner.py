@@ -273,7 +273,7 @@ def test_side_effect_stage_refuses_to_run_when_its_tool_is_absent(registry):
         r.resume_after_approval(state=state, approved=True, client_key="sk-x", task={})
     # compose needs no tools, so it ran; publish needs `gmb`, which does not exist.
     assert ex.value.stage_id == "publish"
-    assert "gmb" in ex.value.reason
+    assert "postiz" in ex.value.reason  # GMB publishing rides on Postiz
     # the publisher model was never invoked
     assert "publish" not in gw.seen_payloads
     assert ("tool_unavailable", "publish") in gw.events

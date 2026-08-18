@@ -84,34 +84,37 @@ class ApprovalRequest(BaseModel):
 
 
 def _available_mcp_tools() -> set[str]:
-    """Which MCP servers are ACTUALLY registered in LiteLLM right now.
+    """Which MCP servers NemoClaw can ACTUALLY use right now.
 
     Ground truth, not what agents.yaml wishes were true. An agent can declare `mcp_tools:
     [postiz]` while no Postiz server exists — and a model will happily narrate having used it
-    (observed live 2026-08-18). Feeding this set into PM's review turns "did you really do that?"
-    from a judgement call into a checkable fact.
+    (observed live 2026-08-18). Feeding this set into the layer-1 stage gate and PM's review turns
+    "did you really do that?" from a judgement call into a checkable fact.
 
-    Fails CLOSED: if the gateway can't be reached we return the empty set, so PM treats every
-    tool as unavailable and flags the claims rather than assuming the best.
+    Derived from `/v1/mcp/tools`, NOT `/v1/mcp/server`. That distinction matters: the server list
+    reflects *registration*, so a server with a stale or wrong credential still appears there and
+    would wrongly satisfy the gate. Listing tools requires LiteLLM to actually connect and
+    handshake, so a server only counts once its tools really came back. Tool names arrive prefixed
+    with the server alias (`postiz-integrationList`), which is where the server names come from.
+
+    Fails CLOSED: if the gateway can't be reached we return the empty set, so every declared tool
+    counts as unavailable and side-effect stages refuse to run.
     """
     try:
         with httpx.Client(
             base_url=os.environ["LITELLM_BASE_URL"].rstrip("/"),
             headers={"Authorization": f"Bearer {os.environ['LITELLM_MASTER_KEY']}"},
-            timeout=10.0,
+            timeout=20.0,
         ) as c:
-            r = c.get("/v1/mcp/server")
+            r = c.get("/v1/mcp/tools")
         if r.status_code >= 400:
+            log.warning("MCP tool listing returned HTTP %s; treating all tools as unavailable",
+                        r.status_code)
             return set()
-        body = r.json()
-        servers = body if isinstance(body, list) else body.get("servers", [])
-        return {
-            s.get("alias") or s.get("server_name") or s.get("name")
-            for s in servers
-            if isinstance(s, dict)
-        } - {None}
+        tools = r.json().get("tools", [])
+        return {t["name"].split("-", 1)[0] for t in tools if isinstance(t, dict) and t.get("name")}
     except Exception:  # noqa: BLE001 - see docstring: unreachable gateway means "nothing available"
-        log.warning("could not list MCP servers; treating all declared tools as unavailable")
+        log.warning("could not list MCP tools; treating all declared tools as unavailable")
         return set()
 
 

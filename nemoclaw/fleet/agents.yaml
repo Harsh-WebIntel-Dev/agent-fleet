@@ -151,7 +151,10 @@ agents:
     model: glm
     fallback: qwen-max
     prompt: prompts/gmb.md
-    mcp_tools: [gmb]
+    # GMB posting rides on our self-hosted Postiz, which has a live Google Business
+    # Profile integration — there is no separate GMB MCP server, and Google ships no
+    # official one. Verified 2026-08-18: postiz integrationList returns a `gmb` account.
+    mcp_tools: [postiz]
     description: GMB posts. Hard rules — no phone numbers in body, 1500-char limit, CTA enum.
 
   dev:

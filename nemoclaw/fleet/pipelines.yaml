@@ -104,7 +104,7 @@ pipelines:
         agent: gmb
         inputs: [compose.output, client.gmb]
         output_schema: publish_result
-        requires_tools: [gmb]
+        requires_tools: [postiz]
         verify: publish_result
         on_fail: abort
 

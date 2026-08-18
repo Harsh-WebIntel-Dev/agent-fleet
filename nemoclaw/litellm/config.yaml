@@ -117,3 +117,22 @@ general_settings:
 # Per-client virtual keys are created via LiteLLM's /key/generate with:
 #   max_budget: <client dollar cap>, metadata: {client_id: <id>}, models: [<allowed aliases>]
 # Agents authenticate with the acting client's virtual key so spend + limits attribute correctly.
+
+# ---------------------------------------------------------------- MCP servers
+#
+# These are the ground truth NemoClaw's layer-1 tool gate reads (`GET /v1/mcp/server`). A stage
+# declaring `requires_tools: [postiz]` in pipelines.yaml hard-fails BEFORE the model is called
+# unless the matching server appears here AND is reachable. See orchestrator/verification.py.
+#
+# RULE (user): official / first-party MCP servers only. Where no official server exists, wrap the
+# vendor's own REST API ourselves rather than adopting a community server.
+mcp_servers:
+  # Self-hosted Postiz (our own infra). Covers Facebook, Instagram AND Google Business Profile —
+  # all three integrations are connected and live, so GMB posting rides on Postiz rather than
+  # needing a separate Google Business Profile API wrapper.
+  postiz:
+    url: https://postiz.widev.com.au/api/mcp
+    transport: http
+    description: "Social + GMB scheduling and publishing via self-hosted Postiz"
+    auth_type: bearer_token
+    auth_value: os.environ/POSTIZ_MCP_TOKEN

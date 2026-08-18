@@ -11,6 +11,9 @@ services:
       - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
       - LANGFUSE_HOST=${LANGFUSE_HOST}
+      # MCP server credentials. config.yaml references these as os.environ/<NAME> under
+      # mcp_servers. Each one registered here is a tool NemoClaw's layer-1 gate will permit.
+      - POSTIZ_MCP_TOKEN=${POSTIZ_MCP_TOKEN}
       - DATABASE_URL=postgresql://litellm:${LITELLM_POSTGRES_PASSWORD}@litellm-postgres:5432/litellm
     depends_on:
       litellm-postgres:

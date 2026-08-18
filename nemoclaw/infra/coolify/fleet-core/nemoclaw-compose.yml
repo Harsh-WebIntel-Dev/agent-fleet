@@ -6,7 +6,7 @@ services:
     #   tar czf - fleet | ssh webintelligenz-prod-2 "tar xzf - -C ~/nemoclaw-build"
     #   ssh webintelligenz-prod-2 "cd ~/nemoclaw-build/fleet && docker build -t nemoclaw:0.1.0 ."
     # Switch to Coolify git deployment once the repo has a remote (see plan: Phase 3 follow-ups).
-    image: nemoclaw:0.3.0
+    image: nemoclaw:0.4.0
     restart: unless-stopped
     environment:
       # LiteLLM is reachable by container name because this service has "Connect to Predefined
