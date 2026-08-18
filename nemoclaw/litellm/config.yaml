@@ -176,6 +176,24 @@ litellm_settings:
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
+  # REQUIRED for the A2A agent registry to survive a restart.
+  #
+  # LiteLLM DOES have rehydration code (_init_agents_in_db), but it is only reachable inside an
+  # `if store_model_in_db is True:` branch — with the flag off it is dead code, the in-memory
+  # registry starts empty and never refills. Proven here 2026-08-18: after a restart the agent row
+  # was still in LiteLLM_AgentsTable while GET /v1/agents returned []. Keys and teams are
+  # unaffected because they are read per-request rather than registry-cached.
+  # Upstream bug: github.com/BerriAI/litellm/issues/33062 (open). Upgrading does not fix it.
+  #
+  # This is NOT cosmetic: /a2a/{agent_id} and `model: "a2a/<name>"` both resolve ONLY from the
+  # in-memory registry, so an empty registry breaks A2A routing, not just the UI listing.
+  #
+  # Two consequences to keep in mind:
+  #   * It starts a ~30s reconcile loop where DB-stored settings begin overriding this file.
+  #     Safe for us today: LiteLLM_Config was verified EMPTY before enabling.
+  #   * Deliberately NOT setting `supported_db_objects` — omitting an object type disables DB
+  #     loading for it, and "agents" is not even a member of the accepted enum.
+  store_model_in_db: true
 
 # Per-client virtual keys are created via LiteLLM's /key/generate with:
 #   max_budget: <client dollar cap>, metadata: {client_id: <id>}, models: [<allowed aliases>]
