@@ -222,6 +222,17 @@ general_settings:
 # RULE (user): official / first-party MCP servers only. Where no official server exists, wrap the
 # vendor's own REST API ourselves rather than adopting a community server.
 mcp_servers:
+  # Client assets in DigitalOcean Spaces. DO's own MCP server covers key MANAGEMENT only
+  # (spaces-key-create/delete/get/list/update) with no object operations, so per the
+  # official-servers-first rule this is our own thin wrapper over DO's S3-compatible API.
+  # Tenant isolation is enforced inside the server: every path is confined to clients/<slug>/
+  # and traversal is rejected in code, not by prompt instruction.
+  spaces:
+    url: http://mcp-spaces-bsx4ax3q1uk3tcgq4pvqpxkb:8080/mcp
+    transport: http
+    description: "Client asset storage (DigitalOcean Spaces): list, read, write, presign, delete"
+    access_groups: ["fleet_tools"]
+
   # Self-hosted Postiz (our own infra). Covers Facebook, Instagram AND Google Business Profile —
   # all three integrations are connected and live, so GMB posting rides on Postiz rather than
   # needing a separate Google Business Profile API wrapper.
@@ -231,3 +242,4 @@ mcp_servers:
     description: "Social + GMB scheduling and publishing via self-hosted Postiz"
     auth_type: bearer_token
     auth_value: os.environ/POSTIZ_MCP_TOKEN
+    access_groups: ["fleet_tools"]
