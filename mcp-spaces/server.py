@@ -136,6 +136,8 @@ def spaces_list(client: str, path: str = "", limit: int = 100) -> dict[str, Any]
             }
             for o in resp.get("Contents", [])
             if not o["Key"].endswith("/")
+            # .trash is operator-facing, not part of the client's working asset list
+            and "/.trash/" not in o["Key"]
         ]
         return {"ok": True, "client": slug, "count": len(items), "files": items,
                 "truncated": resp.get("IsTruncated", False)}
@@ -216,13 +218,31 @@ def spaces_presign(client: str, path: str, expires_seconds: int = 3600) -> dict[
 
 @mcp.tool()
 def spaces_delete(client: str, path: str) -> dict[str, Any]:
-    """Delete a client asset. Deliberately single-object: there is no recursive delete tool."""
+    """Retire a client asset. SOFT delete — the object is moved, never destroyed.
+
+    Deliberately non-destructive. OpenClaw's `approvals` system gates shell exec only, NOT MCP tool
+    calls, so there is no human-in-the-loop gate available for this call. Rather than hand an agent
+    an irreversible action with no gate, deletion moves the object to `.trash/<timestamp>/` inside
+    the same client folder, where a human can restore or purge it.
+
+    Single-object by design: there is no recursive delete tool, so a confused agent cannot empty a
+    client's folder in one call.
+    """
     try:
         key = _key(client, path)
         s3 = _s3()
-        s3.head_object(Bucket=BUCKET, Key=key)  # 404 rather than silently "succeeding"
+        head = s3.head_object(Bucket=BUCKET, Key=key)  # 404 rather than silently "succeeding"
+
+        slug = client.strip().lower()
+        stamp = head["LastModified"].strftime("%Y%m%dT%H%M%S")
+        trash_key = f"{ROOT_PREFIX}/{slug}/.trash/{stamp}/{path.lstrip('/')}"
+
+        s3.copy_object(Bucket=BUCKET, Key=trash_key,
+                       CopySource={"Bucket": BUCKET, "Key": key}, ACL="private")
         s3.delete_object(Bucket=BUCKET, Key=key)
-        return {"ok": True, "path": path, "deleted": True}
+        return {"ok": True, "path": path, "deleted": True, "recoverable": True,
+                "moved_to": trash_key.split(f"{ROOT_PREFIX}/{slug}/", 1)[1],
+                "note": "soft delete — the object was moved to .trash/, not destroyed"}
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
