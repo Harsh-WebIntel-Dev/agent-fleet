@@ -189,7 +189,14 @@ def _image_dimensions(data: bytes) -> tuple[int, int] | None:
 def verify_publish_result(output: dict[str, Any]) -> VerificationResult:
     """`published: true` means nothing on its own. Go and load the page."""
     if not output.get("published"):
-        return VerificationResult.pass_("stage did not claim publication")
+        # An honest "I could not publish" is the RIGHT answer from the model, but it is still a
+        # failed stage — the work did not happen. Without this the run would continue as though it
+        # had. Found 2026-08-18 when deepseek correctly returned published:false and the stage
+        # sailed through verification because there was nothing to verify.
+        return VerificationResult.fail(
+            "stage reported published=false — the publish did not happen",
+            published=False, url=output.get("url"),
+        )
 
     url = (output.get("url") or "").strip()
     remote_id = (output.get("remote_id") or "").strip()

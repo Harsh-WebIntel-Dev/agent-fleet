@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 from .config import Registry, Stage, load_registry
 from .gateway import LiteLLMGateway
 from .memory import ClientDataAccessDenied, MemoryStore
+from .verification import UnverifiableClaim
 from .runner import AwaitingHuman, PipelineRunner, QAGateFailed, RunState, StageFailed
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -122,7 +123,8 @@ def _available_mcp_tools() -> set[str]:
 def healthz() -> dict[str, Any]:
     return {
         "status": "ok",
-        "agents": sorted(registry.agents),
+        "agents": sorted(a.id for a in registry.agents.values() if a.enabled),
+        "agents_disabled": sorted(a.id for a in registry.agents.values() if not a.enabled),
         "pipelines": sorted(registry.pipelines),
     }
 
@@ -331,6 +333,15 @@ def approve(req: ApprovalRequest) -> dict[str, Any]:
         return {"status": "awaiting_approval", "run_id": pause.run_id, "stage": pause.stage_id}
     except QAGateFailed as exc:
         raise HTTPException(422, f"QA gate failed: {exc.reason}") from None
+    except UnverifiableClaim as exc:
+        # A stage claimed a side effect the runner could not confirm. 422, not 500 — this is a
+        # legitimate refusal, and the caller needs the evidence, not a stack trace.
+        raise HTTPException(422, {
+            "error": "stage claim could not be independently verified",
+            "stage": exc.stage_id,
+            "reason": exc.result.reason,
+            "evidence": exc.result.evidence,
+        }) from None
     except StageFailed as exc:
         raise HTTPException(502, str(exc)) from None
 
@@ -367,3 +378,30 @@ def provision_client(client_id: str, max_budget: float = 50.0) -> dict[str, Any]
         if a.enabled
     }
     return {"client_id": client_id, "team_id": team_id, "agent_keys": keys}
+
+
+@app.on_event("startup")
+def register_agents_with_gateway() -> None:
+    """Publish every ENABLED agent into LiteLLM's A2A gateway, on every boot.
+
+    This is not belt-and-braces — it is required. LiteLLM keeps its agent registry IN MEMORY and
+    does NOT hydrate it from its own database at startup: verified 2026-08-18, when 13 agent rows
+    sat in `LiteLLM_AgentsTable` while `GET /v1/agents` returned `[]` after a restart. Re-creating
+    a row makes it visible again, so registration has to happen on our side every time either
+    service restarts, rather than being a one-off setup step someone remembers to re-run.
+
+    Disabled agents are deliberately skipped: registering one advertises an endpoint that answers
+    409, which is worse than it being absent.
+
+    Never fatal — a gateway that is slow to come up must not stop NemoClaw serving.
+    """
+    if os.getenv("NEMOCLAW_SKIP_AGENT_REGISTRATION"):
+        return
+    enabled = [a for a in registry.agents.values() if a.enabled]
+    try:
+        ok, failed = gateway.sync_agents(
+            [(a.id, agent_card(a.id)) for a in enabled]
+        )
+        log.info("agent registration: %s published, %s failed", ok, failed)
+    except Exception:  # noqa: BLE001 - startup must not die on a gateway hiccup
+        log.exception("agent registration failed; agents will be missing from the LiteLLM gateway")

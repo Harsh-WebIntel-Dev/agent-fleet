@@ -42,7 +42,15 @@ class FakeGateway:
         self.runs: dict[str, str] = {}
         self.seen_payloads: dict[str, dict] = {}
         self.timeouts_seen: list[float | None] = []
+        self.tools_seen: list = []
         self._n = 0
+
+    def list_mcp_tools(self, servers=None):
+        # Pretend every requested server exposes one tool, so stages that declare requires_tools
+        # get a non-empty list. The tool LOOP itself is exercised against the live gateway, not here.
+        return [{"type": "function",
+                 "function": {"name": f"{s}-noop", "description": "", "parameters": {}}}
+                for s in sorted(servers or ())]
 
     def say(self, run_id, *, role, content):
         self.messages.append((role, content))
@@ -63,8 +71,10 @@ class FakeGateway:
         return {"run_id": run_id, "status": self.runs.get(run_id)}
 
     def complete(
-        self, *, model, messages, client_key, response_schema=None, session_id=None, timeout=None
+        self, *, model, messages, client_key, response_schema=None, session_id=None, timeout=None,
+        tools=None, max_tool_iterations=6
     ):
+        self.tools_seen.append(tools)
         self.timeouts_seen.append(timeout)
         # last queued response for whichever stage the runner is on
         key = self._current
@@ -340,3 +350,41 @@ def test_config_rejects_a_side_effect_stage_with_no_verification(tmp_path, regis
         load_registry(tmp_path / "fleet")
     msg = str(ex.value)
     assert "requires_tools" in msg or "no verify" in msg
+
+
+def test_stage_requiring_tools_is_actually_handed_them(registry):
+    """Layer 1 passing is not enough — the model must RECEIVE the tools.
+
+    The 2026-08-18 third confabulation: publish was permitted because Postiz was registered, but
+    the completion payload had no `tools` key, so the model had no means to act and invented a URL.
+    """
+    r, gw = _runner(registry, dict(GOOD))
+    with pytest.raises(AwaitingHuman) as paused:
+        r.run(pipeline_id="gmb_post", client_id="c1", task={}, client_key="sk-x")
+    state = RunState(
+        run_id=paused.value.run_id, client_id="c1", pipeline_id="gmb_post",
+        outputs={"compose": GOOD["compose"], "qa": GOOD["qa"]}, completed=["compose", "qa"],
+    )
+    try:
+        r.resume_after_approval(state=state, approved=True, client_key="sk-x", task={})
+    except Exception:
+        pass  # verification of the fake publish result is not what this test is about
+
+    # compose/qa declare no requires_tools -> None. publish declares postiz -> a real list.
+    assert any(t for t in gw.tools_seen if t), f"no stage ever received tools: {gw.tools_seen}"
+    names = [f["function"]["name"] for t in gw.tools_seen if t for f in t]
+    assert any(n.startswith("postiz-") for n in names), names
+
+
+def test_publish_stage_reporting_failure_fails_the_run():
+    """An honest 'I could not publish' is correct from the model but still a failed stage.
+
+    deepseek returns published=false when it has no tools. That must not read as success.
+    """
+    from .verification import verify_publish_result
+
+    result = verify_publish_result(
+        {"published": False, "target": "gmb", "remote_id": "x", "url": "https://example.org/"}
+    )
+    assert result.ok is False
+    assert "did not happen" in result.reason

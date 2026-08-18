@@ -17,6 +17,13 @@
 # never query client storage themselves. Enforced at the gateway via per-agent MCP caps —
 # not by asking the model nicely.
 
+# MODEL TIERS (2026-08-18): every tier resolves to deepseek-v4-pro today — see litellm/config.yaml
+# for the head-to-head that settled it (glm-5.2 claimed a publish it never made; deepseek refused,
+# in half the tokens). Tiers are kept distinct so QA/PM can be escalated to a stronger model by
+# editing config.yaml alone, with no change here.
+#   deep     — judgement that must not be gamed: pm, qa
+#   fast     — short, high-volume, structured: social/gmb/publisher/seo/image/newsletter/accounts
+#   standard — everything else
 defaults:
   # 300s not 180s: qwen3.8-max is a reasoning model and emits long reasoning traces before the
   # JSON payload. 180s produced a real httpx.ReadTimeout mid-pipeline on 2026-08-18. Agents backed
@@ -33,8 +40,8 @@ agents:
   pm:
     display_name: Project Manager
     tier: client
-    model: sonnet
-    fallback: glm
+    model: deep
+    fallback: standard
     prompt: prompts/pm.md
     mcp_tools: [clickup]
     description: >
@@ -46,8 +53,8 @@ agents:
   accounts_manager:
     display_name: Accounts Manager
     tier: client
-    model: glm
-    fallback: qwen-max
+    model: fast
+    fallback: standard
     prompt: prompts/accounts_manager.md
     mcp_tools: []
     description: Per-client budget allocation and spend alerts. Reads LiteLLM + Langfuse.
@@ -57,8 +64,8 @@ agents:
     display_name: Research / Analyst
     timeout_seconds: 420
     tier: skill
-    model: qwen-max
-    fallback: glm
+    model: standard
+    fallback: standard
     prompt: prompts/research.md
     mcp_tools: [semrush, web_search]
     description: Sourced facts, keywords, competitor intel. Cuts hallucination for claims.
@@ -67,8 +74,8 @@ agents:
     display_name: Writer
     timeout_seconds: 420
     tier: skill
-    model: qwen-max          # hero/brand tier; real target was opus (DO tier-blocked)
-    fallback: deepseek-writer # bulk drafts — GENERATION ONLY, no tool calling
+    model: standard
+    fallback: standard
     prompt: prompts/writer.md
     mcp_tools: []
     description: Blogs and copy in the client's brand voice. Brand/template arrives as data from PM.
@@ -76,8 +83,8 @@ agents:
   seo:
     display_name: SEO
     tier: skill
-    model: glm
-    fallback: qwen-max
+    model: fast
+    fallback: standard
     prompt: prompts/seo.md
     mcp_tools: [semrush]
     description: On-page + technical SEO, keyword mapping, meta/title, schema.
@@ -85,8 +92,8 @@ agents:
   social:
     display_name: Social Media
     tier: skill
-    model: glm
-    fallback: qwen-max
+    model: fast
+    fallback: standard
     prompt: prompts/social.md
     mcp_tools: [postiz]
     description: >
@@ -95,8 +102,8 @@ agents:
   newsletter:
     display_name: Newsletter
     tier: skill
-    model: glm
-    fallback: qwen-max
+    model: fast
+    fallback: standard
     prompt: prompts/newsletter.md
     mcp_tools: [mailchimp]
     description: COORDINATOR — assembles from writer/image output and sends. Draft-only by default.
@@ -105,8 +112,8 @@ agents:
   image:
     display_name: Image
     tier: skill
-    model: haiku
-    fallback: glm
+    model: fast
+    fallback: standard
     prompt: prompts/image.md
     mcp_tools: [higgsfield]
     description: Prompt-craft + render. MUST verify output is sharp and on-topic before handoff.
@@ -115,8 +122,8 @@ agents:
     display_name: Video
     timeout_seconds: 420
     tier: skill
-    model: sonnet
-    fallback: glm
+    model: standard
+    fallback: standard
     prompt: prompts/video.md
     mcp_tools: [higgsfield]
     description: Scripts + renders short-form video.
@@ -126,8 +133,8 @@ agents:
     display_name: QA
     timeout_seconds: 420
     tier: skill
-    model: sonnet
-    fallback: qwen-max
+    model: deep
+    fallback: standard
     prompt: prompts/qa.md
     mcp_tools: []
     description: >
@@ -137,8 +144,8 @@ agents:
   publisher:
     display_name: Publisher
     tier: skill
-    model: glm
-    fallback: qwen-max
+    model: fast
+    fallback: standard
     prompt: prompts/publisher.md
     mcp_tools: [wordpress]
     description: >
@@ -148,8 +155,8 @@ agents:
   gmb:
     display_name: Google Business Profile
     tier: skill
-    model: glm
-    fallback: qwen-max
+    model: fast
+    fallback: standard
     prompt: prompts/gmb.md
     # GMB posting rides on our self-hosted Postiz, which has a live Google Business
     # Profile integration — there is no separate GMB MCP server, and Google ships no
@@ -160,8 +167,8 @@ agents:
   dev:
     display_name: Developer
     tier: skill
-    model: qwen-coder
-    fallback: gpt-codex
+    model: standard
+    fallback: standard
     prompt: prompts/dev.md
     mcp_tools: [wordpress, ssh]
     description: Builds/fixes landing pages. Highest-risk agent — all live writes gated.
@@ -170,8 +177,8 @@ agents:
     display_name: Google Ads
     timeout_seconds: 420
     tier: skill
-    model: sonnet
-    fallback: glm
+    model: standard
+    fallback: standard
     prompt: prompts/google_ads.md
     mcp_tools: [google_ads]
     enabled: false   # deliberately LAST to enable — needs a hard structural spend cap first

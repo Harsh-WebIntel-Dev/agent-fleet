@@ -194,6 +194,22 @@ class PipelineRunner:
             {"role": "user", "content": user_msg},
         ]
 
+        # Hand the model the tools its agent is entitled to — scoped to the agent's declared
+        # mcp_tools, so it is never even shown a server it may not use. Only stages that declare
+        # requires_tools get tools at all; a pure-judgement stage (QA, PM review) stays tool-free.
+        tools = None
+        if stage.requires_tools:
+            tools = self.gateway.list_mcp_tools(servers=set(agent.mcp_tools))
+            if not tools:
+                # Layer 1 already passed, so the servers ARE registered. Getting nothing back here
+                # means we cannot actually hand them over — fail rather than run the model
+                # tool-less, which is precisely the state that produces invented results.
+                raise StageFailed(
+                    stage.id,
+                    f"agent '{agent.id}' requires tools {list(stage.requires_tools)} but no tool "
+                    "definitions could be retrieved from the gateway",
+                )
+
         attempts = agent.max_retries + 1
         last_err: str | None = None
 
@@ -207,6 +223,7 @@ class PipelineRunner:
                     response_schema=schema,
                     session_id=state.run_id,
                     timeout=agent.timeout_seconds,
+                    tools=tools,
                 )
                 parsed = parse_json_output(res["content"])
 

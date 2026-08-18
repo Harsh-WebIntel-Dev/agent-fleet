@@ -35,77 +35,140 @@
 # ---------------------------------------------------------------------------------------------
 
 model_list:
-  # --- tier-concept aliases from agent-model-table.csv, interim-backed by open models ---
-  - model_name: haiku
-    litellm_params:
-      model: openai/glm-5.2 # interim substitute; real target: anthropic-claude-haiku-4.5 (403 tier-blocked)
-      api_base: https://inference.do-ai.run/v1
-      api_key: os.environ/DO_INFERENCE_KEY
-    model_info:
-      input_cost_per_token: 0.0000007
-      output_cost_per_token: 0.0000022
-  - model_name: sonnet
-    litellm_params:
-      model: openai/qwen3.8-max # interim substitute; real target: anthropic-claude-4.6-sonnet (403 tier-blocked)
-      api_base: https://inference.do-ai.run/v1
-      api_key: os.environ/DO_INFERENCE_KEY
-    model_info:
-      input_cost_per_token: 0.000002
-      output_cost_per_token: 0.000006
-  - model_name: opus
-    litellm_params:
-      model: openai/qwen3.8-max # interim substitute; real target: anthropic-claude-opus-4.8 (403 tier-blocked)
-      api_base: https://inference.do-ai.run/v1
-      api_key: os.environ/DO_INFERENCE_KEY
-    model_info:
-      input_cost_per_token: 0.000002
-      output_cost_per_token: 0.000006
 
-  # --- cheap tool-capable open models --- VERIFIED WORKING 2026-08-17 (real completions returned)
-  - model_name: glm
-    litellm_params:
-      model: openai/glm-5.2
-      api_base: https://inference.do-ai.run/v1
-      api_key: os.environ/DO_INFERENCE_KEY
-    model_info:
-      input_cost_per_token: 0.0000007   # DO: GLM-5.2  $0.70/M in
-      output_cost_per_token: 0.0000022  # DO: GLM-5.2  $2.20/M out
-  - model_name: qwen-max
-    litellm_params:
-      model: openai/qwen3.8-max
-      api_base: https://inference.do-ai.run/v1
-      api_key: os.environ/DO_INFERENCE_KEY
-    model_info:
-      # DO catalog display name for this slug is "Qwen3.8-2.4T-A95B" (only Qwen3.8 entry present),
-      # so the slug->price mapping here is an inference, not a direct name match. $2/M in, $6/M out.
-      input_cost_per_token: 0.000002
-      output_cost_per_token: 0.000006
-  - model_name: qwen-coder
-    litellm_params:
-      model: openai/qwen3-coder-flash
-      api_base: https://inference.do-ai.run/v1
-      api_key: os.environ/DO_INFERENCE_KEY
-    model_info:
-      input_cost_per_token: 0.00000045  # DO: Qwen3 Coder Flash  $0.45/M in
-      output_cost_per_token: 0.0000017  # DO: Qwen3 Coder Flash  $1.70/M out
-  - model_name: gpt-codex
-    litellm_params:
-      model: openai/qwen3-coder-flash # interim substitute; real target: openai-gpt-5.3-codex (403 tier-blocked)
-      api_base: https://inference.do-ai.run/v1
-      api_key: os.environ/DO_INFERENCE_KEY
-    model_info:
-      input_cost_per_token: 0.00000045
-      output_cost_per_token: 0.0000017
+  # ONE MODEL. Decision 2026-08-18 after a direct head-to-head on the publish stage that had been
+  # producing fabrications. Same prompt, same payload, no tools available:
+  #
+  #   deepseek-v4-pro  -> published:false, real URL      HONEST   970 tokens
+  #   glm-5.2          -> published:TRUE, invented URL   LIED    2092 tokens
+  #   qwen3.8-max      -> published:false, fake domain   PARTIAL 2456 tokens
+  #
+  # glm-5.2 was behind all three confabulations seen that day (an r2.dev spam redirect, a fake
+  # Google Maps link, and invented Postiz post IDs). deepseek was the only model that neither
+  # claimed success nor invented a domain — and it did so in under half the tokens.
+  #
+  # Aliases are TIERS, not vendors, so swapping a tier is a one-line change here and no agent
+  # config moves. All three point at deepseek today; the tier split marks where escalation goes
+  # when stronger models are enabled (QA and PM review are the intended first upgrades).
 
-  # --- generation-only (NO tools): Writer bulk drafts --- VERIFIED WORKING 2026-08-17
-  - model_name: deepseek-writer
-    litellm_params:
+  - model_name: fast
+    litellm_params: &deepseek
       model: openai/deepseek-v4-pro
       api_base: https://inference.do-ai.run/v1
       api_key: os.environ/DO_INFERENCE_KEY
+    model_info: &deepseek_cost
+      # From `doctl gradient list-models` 2026-08-18. An earlier value of $0.87/$1.74
+      # was WRONG and under-counted every budget — see the Phase 2 note on budgets
+      # failing open when costs are missing or understated.
+      input_cost_per_token: 0.00000132   # DO: DeepSeek V4 Pro  $1.32/M in
+      output_cost_per_token: 0.00000396  # DO: DeepSeek V4 Pro  $3.96/M out
+
+  - model_name: standard
+    litellm_params: *deepseek
+    model_info: *deepseek_cost
+
+  # Reserved for judgement-critical work (QA, PM review). Same model for now.
+  - model_name: deep
+    litellm_params: *deepseek
+    model_info: *deepseek_cost
+
+  # OpenAI's OPEN-WEIGHT models. These are NOT partner models, so they are not caught by the
+  # subscription-tier gate below — verified working 2026-08-18. Materially cheaper than deepseek
+  # ($1.32/$3.96), so worth considering for high-volume, low-judgement stages once their honesty
+  # has been measured the same way deepseek's was. Not assigned to any agent yet.
+  - model_name: oss-120b
+    litellm_params:
+      model: openai/openai-gpt-oss-120b
+      api_base: https://inference.do-ai.run/v1
+      api_key: os.environ/DO_INFERENCE_KEY
     model_info:
-      input_cost_per_token: 0.00000087  # DO: Deepseek V4 Pro  $0.87/M in
-      output_cost_per_token: 0.00000174 # DO: Deepseek V4 Pro  $1.74/M out
+      input_cost_per_token: 0.000000055   # $0.055/M in
+      output_cost_per_token: 0.000000385  # $0.385/M out
+
+  - model_name: oss-20b
+    litellm_params:
+      model: openai/openai-gpt-oss-20b
+      api_base: https://inference.do-ai.run/v1
+      api_key: os.environ/DO_INFERENCE_KEY
+    model_info:
+      input_cost_per_token: 0.00000005    # $0.05/M in
+      output_cost_per_token: 0.00000045   # $0.45/M out
+
+# ---------------------------------------------------------------------------
+# ANTHROPIC + OPENAI via DigitalOcean — DEFINED BUT BLOCKED AT THE ACCOUNT LEVEL (2026-08-18)
+#
+# Routing is correct and settled: send to DO's OpenAI-compatible endpoint
+# (https://inference.do-ai.run) authenticated with DO_INFERENCE_KEY. The user's Anthropic key is
+# registered with DigitalOcean as a Partner Model Provider Key in the DO Control Panel, so DO holds
+# it and routes on our behalf. We never call api.anthropic.com or api.openai.com directly — that is
+# unsupported.
+#
+# STATUS: every partner model still returns
+#     403 "this model is not available for your subscription tier"
+# This is NOT a credential or routing problem. Verified by elimination on 2026-08-18:
+#     anthropic-claude-haiku-4.5   403      openai-gpt-4o-mini   403   ($0.15/M — cheapest tier)
+#     anthropic-claude-4.5-sonnet  403      openai-gpt-5-nano    403   ($0.05/M — cheapest tier)
+#     openai-gpt-oss-20b            OK      deepseek-v4-pro       OK   (open-weight)
+# The gate is blanket over ALL partner/proprietary models regardless of price, so it is an account
+# entitlement, not a per-model tier. Registering the partner provider key did not change it.
+#
+# These entries are left in place, priced and ready: when the entitlement is granted they work with
+# no config change. Until then they fail loudly with 403 rather than costing anything.
+#
+# COST NOTE: because these are bring-your-own-key, DO returns NO pricing for them via the API, and
+# LiteLLM's built-in cost map does not know these slugs either. Every cost below is therefore set
+# by hand from `doctl gradient list-models`. Without them, spend logs $0.00 and budgets fail OPEN —
+# that exact bug was found and fixed in Phase 2. Do not add a model here without its price.
+# ---------------------------------------------------------------------------
+
+  - model_name: claude-haiku
+    litellm_params:
+      model: openai/anthropic-claude-haiku-4.5
+      api_base: https://inference.do-ai.run/v1
+      api_key: os.environ/DO_INFERENCE_KEY
+    model_info:
+      input_cost_per_token: 0.000001    # $1.00/M in
+      output_cost_per_token: 0.000005   # $5.00/M out
+
+  - model_name: claude-sonnet
+    litellm_params:
+      model: openai/anthropic-claude-5-sonnet
+      api_base: https://inference.do-ai.run/v1
+      api_key: os.environ/DO_INFERENCE_KEY
+    model_info:
+      input_cost_per_token: 0.000002    # $2.00/M in
+      output_cost_per_token: 0.00001    # $10.00/M out
+
+  - model_name: claude-opus
+    litellm_params:
+      model: openai/anthropic-claude-opus-5
+      api_base: https://inference.do-ai.run/v1
+      api_key: os.environ/DO_INFERENCE_KEY
+    model_info:
+      input_cost_per_token: 0.000005    # $5.00/M in
+      output_cost_per_token: 0.000025   # $25.00/M out
+
+  - model_name: gpt
+    litellm_params:
+      model: openai/openai-gpt-5.4
+      api_base: https://inference.do-ai.run/v1
+      api_key: os.environ/DO_INFERENCE_KEY
+    model_info:
+      input_cost_per_token: 0.0000025   # $2.50/M in
+      output_cost_per_token: 0.000015   # $15.00/M out
+
+  - model_name: gpt-codex
+    litellm_params:
+      model: openai/openai-gpt-5.3-codex
+      api_base: https://inference.do-ai.run/v1
+      api_key: os.environ/DO_INFERENCE_KEY
+    model_info:
+      input_cost_per_token: 0.00000175  # $1.75/M in
+      output_cost_per_token: 0.000014   # $14.00/M out
+
+# DELIBERATELY NOT WIRED — the "pro" tiers are 10-40x the cost of their siblings and nothing in the
+# fleet needs them: openai-gpt-5.4-pro ($30/M in, $180/M out), openai-gpt-5.2-pro ($21/$168).
+# Add one only for a specific, justified job.
 
 litellm_settings:
   success_callback: ["langfuse"]
