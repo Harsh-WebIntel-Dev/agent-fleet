@@ -243,3 +243,58 @@ mcp_servers:
     auth_type: bearer_token
     auth_value: os.environ/POSTIZ_MCP_TOKEN
     access_groups: ["fleet_tools"]
+
+# ---------------------------------------------------------------- guardrails & policies
+#
+# GUARDRAILS ARE CONFIG-DECLARED, not API-created. `POST /guardrails` returns 200 on our community
+# licence but the guardrail does not appear in /guardrails/list — declaring them here is what makes
+# them real. (Creation is NOT licence-gated; only the per-KEY guardrail assignment fields are, and
+# policy attachments route around that.)
+#
+# litellm_content_filter is deliberate: it is on-device regex/keyword matching with NO external
+# dependency, so there is no extra service to run and no per-request network hop. Presidio would
+# need a sidecar we do not have.
+#
+# SCOPE OF WHAT THIS CAN DO: it catches shapes, not meaning. It is the right tool for "a credential
+# must never transit the proxy" and the wrong tool for "is this marketing claim compliant" — that is
+# a judgement, and it belongs to the qa agent, which is why qa runs on the `deep` tier.
+guardrails:
+  - guardrail_name: "wi-credential-block"
+    litellm_params:
+      guardrail: litellm_content_filter
+      mode: pre_call
+      default_on: true
+      patterns:
+        # Only pattern_name values confirmed in the LiteLLM docs are used here. Do not add
+        # unverified names — an unknown pattern_name risks the whole config failing to load.
+        - pattern_type: "prebuilt"
+          pattern_name: "aws_access_key"
+          action: "BLOCK"
+        - pattern_type: "prebuilt"
+          pattern_name: "us_ssn"
+          action: "BLOCK"
+
+  # Output-side pass. An agent that has read a credential from a file must not echo it back into a
+  # response, a social post, or a client-facing message.
+  - guardrail_name: "wi-credential-block-output"
+    litellm_params:
+      guardrail: litellm_content_filter
+      mode: post_call
+      default_on: true
+      patterns:
+        - pattern_type: "prebuilt"
+          pattern_name: "aws_access_key"
+          action: "BLOCK"
+
+# Policies group guardrails and are attached by scope. Scope "*" is every request, which is correct
+# for credential hygiene — no client should be exempt from it.
+policies:
+  wi-baseline:
+    guardrails:
+      add:
+        - wi-credential-block
+        - wi-credential-block-output
+
+policy_attachments:
+  - policy: wi-baseline
+    scope: "*"
