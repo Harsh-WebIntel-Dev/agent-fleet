@@ -1,0 +1,42 @@
+services:
+  # ONE service, 14 A2A endpoints. See fleet/orchestrator/app.py for why this is not 14 containers.
+  nemoclaw:
+    # Image is built ON THE SERVER, not by Coolify: this repo has no git remote yet, and Coolify's
+    # raw-compose services have no source checkout to build from. Build with:
+    #   tar czf - fleet | ssh webintelligenz-prod-2 "tar xzf - -C ~/nemoclaw-build"
+    #   ssh webintelligenz-prod-2 "cd ~/nemoclaw-build/fleet && docker build -t nemoclaw:0.1.0 ."
+    # Switch to Coolify git deployment once the repo has a remote (see plan: Phase 3 follow-ups).
+    image: nemoclaw:0.1.0
+    restart: unless-stopped
+    environment:
+      # LiteLLM is reachable by container name because this service has "Connect to Predefined
+      # Networks" enabled in Coolify — WITHOUT that toggle each Coolify service sits on its own
+      # private network and this resolves to nothing. See coolify_service_networking_gotcha.
+      - LITELLM_BASE_URL=http://litellm-v10up2yg1cwxo0k1ks9j2qro:4000
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - FLEET_DATABASE_URL=${FLEET_DATABASE_URL}
+      # Used in agent cards as the callback URL LiteLLM registers against. Internal only —
+      # NemoClaw must never get a public Traefik route; hermes-<client> is the public tier.
+      - NEMOCLAW_PUBLIC_URL=http://nemoclaw:8000
+      - LOG_LEVEL=INFO
+      # Belt-and-braces against the Next.js-style single-interface bind problem seen on Langfuse.
+      - HOST=0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
+      interval: 15s
+      timeout: 8s
+      retries: 5
+      start_period: 40s
+
+  # Tailscale-only access for debugging the orchestrator directly. Same disposable-sidecar
+  # pattern as Infisical (18789) / Langfuse (18790) / LiteLLM (18791) — never a port on the
+  # real service, and no firewall change needed because DOCKER-USER is an eth0-scoped DENY
+  # list, not a Tailscale allow list (verified 2026-08-17).
+  nemoclaw-tailscale-proxy:
+    image: alpine/socat
+    restart: unless-stopped
+    command: ["-d", "-d", "tcp-listen:8000,fork,reuseaddr", "tcp-connect:nemoclaw:8000"]
+    ports:
+      - "100.115.104.5:18792:8000"
+    depends_on:
+      - nemoclaw

@@ -1,0 +1,59 @@
+services:
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    restart: unless-stopped
+    entrypoint: sh
+    command: -c 'echo "$$LITELLM_CONFIG_B64" | base64 -d > /app/config.yaml && exec litellm --config /app/config.yaml --port 4000'
+    environment:
+      - LITELLM_CONFIG_B64=${LITELLM_CONFIG_B64}
+      - DO_INFERENCE_KEY=${DO_INFERENCE_KEY}
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
+      - LANGFUSE_HOST=${LANGFUSE_HOST}
+      - DATABASE_URL=postgresql://litellm:${LITELLM_POSTGRES_PASSWORD}@litellm-postgres:5432/litellm
+    depends_on:
+      litellm-postgres:
+        condition: service_healthy
+    # NOTE: this image (Chainguard wolfi-base) has NO wget and NO curl. The original
+    # wget-based healthcheck failed on every run ('exec: "wget": executable file not
+    # found in $PATH'), so the container reported unhealthy for 250 consecutive checks
+    # while actually serving fine. python3 IS present - use it.
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:4000/health/liveliness',timeout=4).status==200 else 1)"]
+      interval: 15s
+      timeout: 8s
+      retries: 5
+      start_period: 90s
+
+  litellm-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=litellm
+      - POSTGRES_PASSWORD=${LITELLM_POSTGRES_PASSWORD}
+      - POSTGRES_DB=litellm
+    volumes:
+      - litellm-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Stateless TCP forwarder so the LiteLLM admin UI (/ui) is reachable over Tailscale
+  # without an SSH tunnel. Disposable sidecar, not a port on litellm itself - same
+  # pattern as Infisical (18789) and Langfuse (18790). No firewall change is needed:
+  # DOCKER-USER on this host is an eth0-scoped DENY list, not a Tailscale allow list,
+  # so binding to 100.115.104.5 is sufficient on its own (verified 2026-08-17).
+  litellm-tailscale-proxy:
+    image: alpine/socat
+    restart: unless-stopped
+    command: ["-d", "-d", "tcp-listen:4000,fork,reuseaddr", "tcp-connect:litellm:4000"]
+    ports:
+      - "100.115.104.5:18791:4000"
+    depends_on:
+      - litellm
+
+volumes:
+  litellm-postgres-data:

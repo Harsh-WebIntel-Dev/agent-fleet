@@ -1,0 +1,119 @@
+# NemoClaw LiteLLM proxy model map.
+#
+# STATUS: verified live via real chat-completion calls through this proxy on 2026-08-17/18.
+# DECISION 2026-08-17 (user): use open-source models for now. Claude (haiku/sonnet/opus) and
+# GPT-5.3-Codex are all correctly configured on DO but blocked with 403 "not available for your
+# subscription tier" - a DO plan/billing decision, not a config problem. Rather than block
+# Phase 3 on that decision, the tier-concept alias NAMES from agent-model-table.csv (haiku,
+# sonnet, opus, gpt-codex) are kept as-is so agent configs don't need to change later, but each
+# now points at a verified-working open model instead. The original Claude/GPT slug for each is
+# preserved in a comment - reverting once the tier is upgraded is a one-line change per alias.
+#
+# Open-model substitution mapping (revisit if the DO tier gets upgraded):
+#   haiku      -> glm-5.2           (was anthropic-claude-haiku-4.5)   - cheap/fast tier
+#   sonnet     -> qwen3.8-max       (was anthropic-claude-4.6-sonnet)  - mid/high reasoning tier
+#   opus       -> qwen3.8-max       (was anthropic-claude-opus-4.8)    - highest reasoning tier
+#                 (same model as sonnet for now - no confirmed-stronger open model on DO yet;
+#                  kimi-k3 / mimo-v2.5-pro exist but are UNTESTED)
+#   gpt-codex  -> qwen3-coder-flash (was openai-gpt-5.3-codex)
+#
+# DECISION 2026-08-17 (user): no Gemini/Google at all - provider-direct exception removed entirely.
+#
+# ---------------------------------------------------------------------------------------------
+# PRICING (added 2026-08-18) - REQUIRED FOR BUDGETS TO WORK AT ALL.
+# Without model_info costs, LiteLLM logs every request at spend=$0.00 (tokens ARE still counted),
+# so per-client max_budget NEVER triggers and budgets fail OPEN. Verified: 45 spend-log rows, 20
+# with tokens>0, ALL at spend 0.0, and a $0.01-budget key still serving traffic.
+#
+# Values come from `doctl gradient list-models` -> pricing{}. CRITICAL UNIT TRAP: the field is
+# named `input_price_per_million` but the VALUE IS DOLLARS PER TOKEN. Verified against models with
+# public list prices: GPT-5 raw 1.25e-06 -> $1.25/M (correct), Claude Sonnet 4.6 raw 3e-06 ->
+# $3.00/M (correct), Claude Opus 4.5 raw 5e-06 -> $5.00/M (correct). Treating the value as
+# per-million would understate cost by 1,000,000x.
+# Written as plain decimals on purpose: YAML 1.1 parses `7e-07` as a STRING, not a float.
+# Re-check these when DO changes pricing - they are a snapshot, not a live feed.
+# ---------------------------------------------------------------------------------------------
+
+model_list:
+  # --- tier-concept aliases from agent-model-table.csv, interim-backed by open models ---
+  - model_name: haiku
+    litellm_params:
+      model: openai/glm-5.2 # interim substitute; real target: anthropic-claude-haiku-4.5 (403 tier-blocked)
+      api_base: https://inference.do-ai.run/v1
+      api_key: os.environ/DO_INFERENCE_KEY
+    model_info:
+      input_cost_per_token: 0.0000007
+      output_cost_per_token: 0.0000022
+  - model_name: sonnet
+    litellm_params:
+      model: openai/qwen3.8-max # interim substitute; real target: anthropic-claude-4.6-sonnet (403 tier-blocked)
+      api_base: https://inference.do-ai.run/v1
+      api_key: os.environ/DO_INFERENCE_KEY
+    model_info:
+      input_cost_per_token: 0.000002
+      output_cost_per_token: 0.000006
+  - model_name: opus
+    litellm_params:
+      model: openai/qwen3.8-max # interim substitute; real target: anthropic-claude-opus-4.8 (403 tier-blocked)
+      api_base: https://inference.do-ai.run/v1
+      api_key: os.environ/DO_INFERENCE_KEY
+    model_info:
+      input_cost_per_token: 0.000002
+      output_cost_per_token: 0.000006
+
+  # --- cheap tool-capable open models --- VERIFIED WORKING 2026-08-17 (real completions returned)
+  - model_name: glm
+    litellm_params:
+      model: openai/glm-5.2
+      api_base: https://inference.do-ai.run/v1
+      api_key: os.environ/DO_INFERENCE_KEY
+    model_info:
+      input_cost_per_token: 0.0000007   # DO: GLM-5.2  $0.70/M in
+      output_cost_per_token: 0.0000022  # DO: GLM-5.2  $2.20/M out
+  - model_name: qwen-max
+    litellm_params:
+      model: openai/qwen3.8-max
+      api_base: https://inference.do-ai.run/v1
+      api_key: os.environ/DO_INFERENCE_KEY
+    model_info:
+      # DO catalog display name for this slug is "Qwen3.8-2.4T-A95B" (only Qwen3.8 entry present),
+      # so the slug->price mapping here is an inference, not a direct name match. $2/M in, $6/M out.
+      input_cost_per_token: 0.000002
+      output_cost_per_token: 0.000006
+  - model_name: qwen-coder
+    litellm_params:
+      model: openai/qwen3-coder-flash
+      api_base: https://inference.do-ai.run/v1
+      api_key: os.environ/DO_INFERENCE_KEY
+    model_info:
+      input_cost_per_token: 0.00000045  # DO: Qwen3 Coder Flash  $0.45/M in
+      output_cost_per_token: 0.0000017  # DO: Qwen3 Coder Flash  $1.70/M out
+  - model_name: gpt-codex
+    litellm_params:
+      model: openai/qwen3-coder-flash # interim substitute; real target: openai-gpt-5.3-codex (403 tier-blocked)
+      api_base: https://inference.do-ai.run/v1
+      api_key: os.environ/DO_INFERENCE_KEY
+    model_info:
+      input_cost_per_token: 0.00000045
+      output_cost_per_token: 0.0000017
+
+  # --- generation-only (NO tools): Writer bulk drafts --- VERIFIED WORKING 2026-08-17
+  - model_name: deepseek-writer
+    litellm_params:
+      model: openai/deepseek-v4-pro
+      api_base: https://inference.do-ai.run/v1
+      api_key: os.environ/DO_INFERENCE_KEY
+    model_info:
+      input_cost_per_token: 0.00000087  # DO: Deepseek V4 Pro  $0.87/M in
+      output_cost_per_token: 0.00000174 # DO: Deepseek V4 Pro  $1.74/M out
+
+litellm_settings:
+  success_callback: ["langfuse"]
+  drop_params: true
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+# Per-client virtual keys are created via LiteLLM's /key/generate with:
+#   max_budget: <client dollar cap>, metadata: {client_id: <id>}, models: [<allowed aliases>]
+# Agents authenticate with the acting client's virtual key so spend + limits attribute correctly.

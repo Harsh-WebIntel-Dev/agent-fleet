@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Secrets — belong in Infisical / Coolify env vars, NEVER in the repo.
+# The plan's hard constraint #4: "Secrets. Infisical only. Never commit keys."
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+
+# Local scratch
+*.log
+.DS_Store

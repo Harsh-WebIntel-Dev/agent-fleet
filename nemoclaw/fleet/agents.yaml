@@ -1,0 +1,175 @@
+# NemoClaw agent registry.
+#
+# A specialist is CONFIG, not a service. Each entry here becomes:
+#   - one A2A endpoint on the single NemoClaw service  (/a2a/<id>)
+#   - one agent card at                                (/a2a/<id>/.well-known/agent-card.json)
+#   - one registration in LiteLLM's agent gateway      (per-agent budget + MCP caps)
+#
+# `model` values are LiteLLM ALIASES, never raw provider slugs — so swapping the
+# underlying model (e.g. when the DO tier is upgraded and `sonnet` points back at real
+# Claude) needs no change here. See litellm/config.yaml.
+#
+# MEMORY TIERING — enforced, not advisory:
+#   tier: client   -> may read/write `client_kb` + `memory` for the acting client (PM, Hermes only)
+#   tier: skill    -> may read/write `skill_kb` ONLY. NO access to client storage, ever.
+# Specialists are the SHARED tier (one Writer serves every client), which makes them the
+# obvious cross-tenant leak path. They receive client context as DATA in the request and
+# never query client storage themselves. Enforced at the gateway via per-agent MCP caps —
+# not by asking the model nicely.
+
+defaults:
+  # 300s not 180s: qwen3.8-max is a reasoning model and emits long reasoning traces before the
+  # JSON payload. 180s produced a real httpx.ReadTimeout mid-pipeline on 2026-08-18. Agents backed
+  # by it override higher still.
+  timeout_seconds: 300
+  max_retries: 1
+  # every stage must return JSON matching its declared schema; free-text handoffs are banned
+  # because open-weight models drift. See orchestrator/runner.py.
+  require_structured_output: true
+
+agents:
+
+  # ---------------------------------------------------------------- orchestration
+  pm:
+    display_name: Project Manager
+    tier: client
+    model: sonnet
+    fallback: glm
+    prompt: prompts/pm.md
+    mcp_tools: [clickup]
+    description: >
+      Decomposes a request into an ordered pipeline, delegates to specialists, collects and
+      validates results, and owns the human-approval state machine. Control flow lives in
+      orchestrator/runner.py — the model chooses WHICH pipeline and judges quality, it does
+      not invent the sequencing.
+
+  accounts_manager:
+    display_name: Accounts Manager
+    tier: client
+    model: glm
+    fallback: qwen-max
+    prompt: prompts/accounts_manager.md
+    mcp_tools: []
+    description: Per-client budget allocation and spend alerts. Reads LiteLLM + Langfuse.
+
+  # ---------------------------------------------------------------- content
+  research:
+    display_name: Research / Analyst
+    timeout_seconds: 420
+    tier: skill
+    model: qwen-max
+    fallback: glm
+    prompt: prompts/research.md
+    mcp_tools: [semrush, web_search]
+    description: Sourced facts, keywords, competitor intel. Cuts hallucination for claims.
+
+  writer:
+    display_name: Writer
+    timeout_seconds: 420
+    tier: skill
+    model: qwen-max          # hero/brand tier; real target was opus (DO tier-blocked)
+    fallback: deepseek-writer # bulk drafts — GENERATION ONLY, no tool calling
+    prompt: prompts/writer.md
+    mcp_tools: []
+    description: Blogs and copy in the client's brand voice. Brand/template arrives as data from PM.
+
+  seo:
+    display_name: SEO
+    tier: skill
+    model: glm
+    fallback: qwen-max
+    prompt: prompts/seo.md
+    mcp_tools: [semrush]
+    description: On-page + technical SEO, keyword mapping, meta/title, schema.
+
+  social:
+    display_name: Social Media
+    tier: skill
+    model: glm
+    fallback: qwen-max
+    prompt: prompts/social.md
+    mcp_tools: [postiz]
+    description: >
+      COORDINATOR — creates nothing itself. Briefs writer/image/video and schedules via Postiz.
+
+  newsletter:
+    display_name: Newsletter
+    tier: skill
+    model: glm
+    fallback: qwen-max
+    prompt: prompts/newsletter.md
+    mcp_tools: [mailchimp]
+    description: COORDINATOR — assembles from writer/image output and sends. Draft-only by default.
+
+  # ---------------------------------------------------------------- media
+  image:
+    display_name: Image
+    tier: skill
+    model: haiku
+    fallback: glm
+    prompt: prompts/image.md
+    mcp_tools: [higgsfield]
+    description: Prompt-craft + render. MUST verify output is sharp and on-topic before handoff.
+
+  video:
+    display_name: Video
+    timeout_seconds: 420
+    tier: skill
+    model: sonnet
+    fallback: glm
+    prompt: prompts/video.md
+    mcp_tools: [higgsfield]
+    description: Scripts + renders short-form video.
+
+  # ---------------------------------------------------------------- delivery
+  qa:
+    display_name: QA
+    timeout_seconds: 420
+    tier: skill
+    model: sonnet
+    fallback: qwen-max
+    prompt: prompts/qa.md
+    mcp_tools: []
+    description: >
+      GATE. Quality, brand fit, and greenwashing/ACL compliance. Publisher cannot run until QA
+      passes. Returns a hard pass/fail plus reasons — never rewrites the content itself.
+
+  publisher:
+    display_name: Publisher
+    tier: skill
+    model: glm
+    fallback: qwen-max
+    prompt: prompts/publisher.md
+    mcp_tools: [wordpress]
+    description: >
+      Deterministic publishing/scheduling. Receives QA-passed content only. NEVER fabricates a
+      placeholder asset — fail loudly instead (this is a real past failure, see openclaw history).
+
+  gmb:
+    display_name: Google Business Profile
+    tier: skill
+    model: glm
+    fallback: qwen-max
+    prompt: prompts/gmb.md
+    mcp_tools: [gmb]
+    description: GMB posts. Hard rules — no phone numbers in body, 1500-char limit, CTA enum.
+
+  dev:
+    display_name: Developer
+    tier: skill
+    model: qwen-coder
+    fallback: gpt-codex
+    prompt: prompts/dev.md
+    mcp_tools: [wordpress, ssh]
+    description: Builds/fixes landing pages. Highest-risk agent — all live writes gated.
+
+  google_ads:
+    display_name: Google Ads
+    timeout_seconds: 420
+    tier: skill
+    model: sonnet
+    fallback: glm
+    prompt: prompts/google_ads.md
+    mcp_tools: [google_ads]
+    enabled: false   # deliberately LAST to enable — needs a hard structural spend cap first
+    description: Campaign build/optimise. Disabled until everything else is proven.

@@ -1,0 +1,15 @@
+Agent,Default model,Fallback Model,Talks to,Role
+Hermes (client-facing),Claude Haiku 4.5,GLM-5.2 (internal Webster),-> PM,"Front-door: conversation + ClickUp, hands all work to PM"
+PM,Claude Sonnet 4.6,Opus 4.8,-> every specialist; checks Accounts Manager,"Decomposes, sequences, delegates; budget-gated"
+Accounts Manager,GLM-5.2,Haiku 4.5,gates PM; reads LiteLLM + Langfuse,Per-client budget allocation + spend alerts
+Research / Analyst,Qwen3.8-max (+ web search),GLM-5.2,"-> feeds Writer, SEO, Social, Newsletter, Google Ads","Sourced facts, keywords, competitor intel; cuts hallucination (key for Biogone claims)"
+Writer,Opus 4.8 (hero/brand),DeepSeek V4 Pro (bulk drafts),<- Research; -> QA; serves Social + Newsletter,Blogs + copy; brand voice; supplies copy to social/newsletter
+SEO,GLM-5.2,Qwen3.8-max,"SEMrush; -> Writer, Publisher, Google Ads",On-page + technical SEO; keyword feed
+Social Media Marketer,GLM-5.2,Claude Sonnet 4.6,"-> Writer (copy), Image (graphics), Video (reels); schedules via Postiz","Coordinates, assembles, schedules - creates nothing itself"
+Newsletter,GLM-5.2,Qwen3.8-max,"-> Writer (content), Image (visuals); pushes via Mailchimp",Assembles + sends newsletters
+Publisher,GLM-5.2,Qwen3.8-max,<- QA; publishes to WordPress/CMS,Deterministic publishing + scheduling
+Image,Haiku 4.5 brain + Higgsfield render,Kimi K2.6 / DO Flux Schnell,"<- Social, Newsletter, Writer, Video",Prompt-craft + render; returns assets
+Video,Sonnet 4.6 (script) + Haiku (shots) + Higgsfield,DO Wan2.2 (fallback),<- Social; -> Image (frames),Scripts + renders reels
+Dev,Qwen3 Coder Flash,GPT-5.3-Codex,"<- Writer (copy), SEO; deploys",Builds landing pages (see plan note: verify tool-calling if agentic)
+QA,Claude Sonnet 4.6,Opus 4.8 (legal / ACL content),<- all content agents; -> Publisher,"Gate: quality, brand, greenwashing/ACL check"
+Google Ads,Claude Sonnet 4.6,GLM-5.2,"Google Ads API; SEO, Writer",Campaign build/optimize; pulls ad copy from Writer

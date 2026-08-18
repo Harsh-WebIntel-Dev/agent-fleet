@@ -1,0 +1,107 @@
+# NemoClaw pipeline definitions.
+#
+# WHY PIPELINES ARE DECLARED HERE AND EXECUTED BY CODE (orchestrator/runner.py):
+# We run open-weight models by deliberate choice. The previous attempt (OpenClaw) failed on
+# ORCHESTRATION, not tooling — DeepSeek confabulated capabilities it lacked and subagent results
+# were silently lost. The fix then, and the rule now: control flow lives in code, judgement lives
+# in the model. The PM model picks WHICH pipeline fits a request; it does not invent the steps.
+#
+# Each stage:
+#   agent          — id from agents.yaml
+#   inputs         — which prior stage outputs (+ client context keys) get injected
+#   output_schema  — JSON schema key from schemas.yaml; output is VALIDATED, not trusted
+#   gate           — optional. `human` pauses the run until a human approves in ClickUp.
+#   on_fail        — retry | abort | skip
+#
+# Stages never talk to each other directly. The runner passes validated output forward, and every
+# transition is appended to the LiteLLM workflow-runs ledger so a crashed run is resumable.
+
+pipelines:
+
+  blog:
+    description: Research → draft → SEO → images → QA gate → human approval → publish.
+    stages:
+      - id: research
+        agent: research
+        inputs: [task.topic, client.brand, client.seo_focus]
+        output_schema: research_brief
+        on_fail: retry
+
+      - id: draft
+        agent: writer
+        # client.blog_template is the concrete example from the user: PM holds it in client_kb
+        # and INJECTS it. The writer never looks it up.
+        inputs: [research.output, client.brand, client.blog_template, client.tone]
+        output_schema: article_draft
+        on_fail: retry
+
+      - id: seo_pass
+        agent: seo
+        inputs: [draft.output, client.seo_focus]
+        output_schema: seo_meta
+        on_fail: retry
+
+      - id: images
+        agent: image
+        inputs: [draft.output.title, draft.output.image_briefs, client.brand]
+        output_schema: image_set
+        on_fail: retry
+
+      - id: qa
+        agent: qa
+        # QA is a hard gate. It sees everything and returns pass/fail + reasons.
+        inputs: [draft.output, seo_pass.output, images.output, client.compliance_notes]
+        output_schema: qa_verdict
+        gate: qa_must_pass
+        on_fail: abort
+
+      - id: approval
+        gate: human           # pauses run; resumes on ClickUp status -> approved
+        approve_status: approved
+        reject_status: rejected
+        on_reject:
+          rework_from: draft
+
+      - id: publish
+        agent: publisher
+        inputs: [draft.output, seo_pass.output, images.output, client.wordpress]
+        output_schema: publish_result
+        on_fail: abort
+
+  gmb_post:
+    description: Short Google Business Profile post derived from an existing published article.
+    stages:
+      - id: compose
+        agent: gmb
+        inputs: [task.source_url, client.brand, client.nap]
+        output_schema: gmb_post
+        on_fail: retry
+      - id: qa
+        agent: qa
+        inputs: [compose.output, client.compliance_notes]
+        output_schema: qa_verdict
+        gate: qa_must_pass
+        on_fail: abort
+      - id: approval
+        gate: human
+        approve_status: approved
+        reject_status: rejected
+        on_reject:
+          rework_from: compose
+      - id: publish
+        agent: gmb
+        inputs: [compose.output, client.gmb]
+        output_schema: publish_result
+        on_fail: abort
+
+  # A single-shot consult — PM answering a user question that needs specialist input.
+  # No gate, no publish, nothing leaves the system. This is the path for
+  # "PM needs specialist advice to answer the client".
+  consult:
+    description: One specialist answers one question; PM relays. Read-only, no side effects.
+    stages:
+      - id: answer
+        agent: "{{ task.specialist }}"   # runner resolves from the PM's routing decision
+        inputs: [task.question, client.brand]
+        output_schema: consult_answer
+        on_fail: retry
