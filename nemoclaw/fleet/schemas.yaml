@@ -122,6 +122,27 @@ schemas:
       remote_id: {type: string, minLength: 1}
       url: {type: string, minLength: 1}
 
+  pm_review:
+    # PM's backstop review of work that did NOT pass through the QA gate.
+    # RULE (user, 2026-08-18): publishable work that doesn't go through QA must be checked by PM
+    # before it goes back to the user. Nothing user-facing leaves the fleet unreviewed.
+    type: object
+    required: [approved_for_user, summary, unverified_claims, concerns]
+    additionalProperties: false
+    properties:
+      approved_for_user: {type: boolean}
+      # PM's own words, not a copy of the specialist's output — this is what the user reads.
+      summary: {type: string, minLength: 1}
+      # The anti-confabulation field. PM lists any claim the specialist made that PM cannot
+      # confirm actually happened (e.g. "scheduled via Postiz" when no Postiz tool is wired).
+      # Empty list means PM asserts everything claimed is verifiable — which is itself checkable.
+      unverified_claims:
+        type: array
+        items: {type: string}
+      concerns:
+        type: array
+        items: {type: string}
+
   consult_answer:
     type: object
     required: [answer, confidence]

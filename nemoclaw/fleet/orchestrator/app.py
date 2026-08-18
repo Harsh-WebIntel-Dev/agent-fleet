@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import logging
 import os
+
+import httpx
 from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from .config import Registry, load_registry
+from .config import Registry, Stage, load_registry
 from .gateway import LiteLLMGateway
 from .memory import ClientDataAccessDenied, MemoryStore
 from .runner import AwaitingHuman, PipelineRunner, QAGateFailed, RunState, StageFailed
@@ -37,7 +39,12 @@ gateway = LiteLLMGateway(
     master_key=os.environ["LITELLM_MASTER_KEY"],
 )
 memory = MemoryStore(dsn=os.environ["FLEET_DATABASE_URL"])
-runner = PipelineRunner(registry=registry, gateway=gateway, memory=memory)
+# available_tools is what makes `requires_tools` real: the runner asks LiteLLM what MCP servers
+# exist before it lets a side-effect stage run at all.
+runner = PipelineRunner(
+    registry=registry, gateway=gateway, memory=memory,
+    available_tools=lambda: _available_mcp_tools(),
+)
 
 app = FastAPI(title="NemoClaw", version="0.1.0")
 
@@ -74,6 +81,38 @@ class ApprovalRequest(BaseModel):
 
 
 # ---------------------------------------------------------------- health / discovery
+
+
+def _available_mcp_tools() -> set[str]:
+    """Which MCP servers are ACTUALLY registered in LiteLLM right now.
+
+    Ground truth, not what agents.yaml wishes were true. An agent can declare `mcp_tools:
+    [postiz]` while no Postiz server exists — and a model will happily narrate having used it
+    (observed live 2026-08-18). Feeding this set into PM's review turns "did you really do that?"
+    from a judgement call into a checkable fact.
+
+    Fails CLOSED: if the gateway can't be reached we return the empty set, so PM treats every
+    tool as unavailable and flags the claims rather than assuming the best.
+    """
+    try:
+        with httpx.Client(
+            base_url=os.environ["LITELLM_BASE_URL"].rstrip("/"),
+            headers={"Authorization": f"Bearer {os.environ['LITELLM_MASTER_KEY']}"},
+            timeout=10.0,
+        ) as c:
+            r = c.get("/v1/mcp/server")
+        if r.status_code >= 400:
+            return set()
+        body = r.json()
+        servers = body if isinstance(body, list) else body.get("servers", [])
+        return {
+            s.get("alias") or s.get("server_name") or s.get("name")
+            for s in servers
+            if isinstance(s, dict)
+        } - {None}
+    except Exception:  # noqa: BLE001 - see docstring: unreachable gateway means "nothing available"
+        log.warning("could not list MCP servers; treating all declared tools as unavailable")
+        return set()
 
 
 @app.get("/healthz")
@@ -147,8 +186,6 @@ def invoke_agent(agent_id: str, msg: A2AMessage) -> dict[str, Any]:
     if agent.is_client_tier:
         payload["client"] = memory.build_client_context(agent, msg.client_id)
 
-    from .config import Stage  # local import: only needed for this synthetic single-stage call
-
     stage = Stage(
         id="direct",
         agent=agent_id,
@@ -166,8 +203,62 @@ def invoke_agent(agent_id: str, msg: A2AMessage) -> dict[str, Any]:
         gateway.close_run(run_id, status="failed")
         raise HTTPException(502, exc.reason) from None
 
+    # RULE (user, 2026-08-18): output that did not pass a QA gate gets a PM check before it goes
+    # back to the user. A direct specialist call has no QA stage, so PM reviews it here.
+    # PM is also told which of the specialist's declared tools actually exist, so it can catch the
+    # confabulation class we hit live — an agent reporting work it had no means to perform.
+    review: dict[str, Any] | None = None
+    if agent.id != runner.pm_agent_id:
+        pm = registry.agent(runner.pm_agent_id)
+        available = _available_mcp_tools()
+        missing = [t for t in agent.mcp_tools if t not in available]
+        review_stage = Stage(
+            id="pm_review",
+            agent=pm.id,
+            inputs=(),
+            output_schema="pm_review",
+            gate="pm_must_approve",
+            on_fail="abort",
+        )
+        review_payload = {
+            "specialist": agent.id,
+            "specialist_output": out,
+            "original_request": msg.message,
+            "declared_tools": list(agent.mcp_tools),
+            "tools_actually_available": sorted(available & set(agent.mcp_tools)),
+            "tools_UNAVAILABLE": missing,
+            "instruction": (
+                "Review this specialist's output before it is returned to the user. Any claim of "
+                "an action performed with a tool listed in tools_UNAVAILABLE could NOT have "
+                "happened — list it in unverified_claims and do not approve it as fact."
+            ),
+        }
+        try:
+            review = runner._run_agent_stage(
+                review_stage, pm, review_payload, state, msg.client_key
+            )
+        except StageFailed as exc:
+            gateway.close_run(run_id, status="failed")
+            raise HTTPException(502, f"PM review failed: {exc.reason}") from None
+
+        if not review.get("approved_for_user", False):
+            gateway.close_run(run_id, status="failed", output={"review": review})
+            raise HTTPException(
+                422,
+                {
+                    "error": "PM did not approve this output for the user",
+                    "concerns": review.get("concerns"),
+                    "unverified_claims": review.get("unverified_claims"),
+                },
+            )
+
     gateway.close_run(run_id, status="completed", output=out)
-    return {"agent": agent_id, "run_id": run_id, "result": out}
+    return {
+        "agent": agent_id,
+        "run_id": run_id,
+        "result": out,
+        "pm_review": review,  # None only when PM itself was the agent invoked
+    }
 
 
 # ---------------------------------------------------------------- pipelines

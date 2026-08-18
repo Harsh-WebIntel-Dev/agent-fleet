@@ -49,10 +49,33 @@ a model confabulated capabilities it lacked and subagent results were lost. Henc
 
 - **Control flow in code, judgement in the model.** The PM model picks *which* pipeline; it never
   invents the sequence.
-- **Validate every stage against a JSON schema.** Schemas include hard-to-fake fields (`remote_id`,
-  real image dimensions) so a model cannot claim success it didn't achieve.
-- **State in the LiteLLM workflow-run ledger**, so a crashed run resumes rather than restarts.
+- **Validate every stage against a JSON schema.** This catches malformed and drifting output.
+  It does **not** catch lying: a schema enforces *shape*, not *truth*, and `{"type": "string"}` is
+  satisfied by any invention. We learned this the hard way — see below.
+- **Three layers against confabulation**, because prompt instructions are not a control:
+  1. `requires_tools` on a stage — if the MCP server it needs is not registered in LiteLLM, the
+     stage hard-fails **before the model is called**. No tool, no opportunity to improvise.
+  2. `verify` on a stage — after the claim, the *runner* independently checks it (fetches the
+     published URL, downloads each image and decodes its real dimensions). Verification never
+     lives in the agent that made the claim.
+  3. A PM review gate (`pm_must_approve`) on any pipeline with no QA gate, told which tools
+     actually exist, so nothing user-facing leaves the fleet unreviewed.
+  Layers 1 and 2 are mandatory on any stage producing a side-effect schema — `config.py` refuses
+  to start otherwise.
+- **State in the LiteLLM workflow-run ledger** plus a local `app.runs` mirror, so a crashed or
+  paused run resumes rather than restarts.
 - **Capability limits at the gateway**, so confabulation cannot become privilege.
+
+### Why layer 1 and 2 exist (do not remove them)
+
+On 2026-08-18, with **zero** MCP servers registered, `publisher` returned a complete, schema-valid
+publish result — invented `remote_id`, and a Google *search* URL dressed up as a published page.
+The same day, `social` reported having scheduled Facebook and Instagram posts via Postiz, with post
+IDs, having called nothing. Both agents' prompts explicitly forbade reporting unachieved work.
+
+Re-running the identical `social` request later, the same model with the same prompt refused and
+cited its honesty rules. Same inputs, opposite behaviour — prompt-level honesty is a coin flip.
+That is the whole argument for putting the gate in Python.
 
 ## Layout
 

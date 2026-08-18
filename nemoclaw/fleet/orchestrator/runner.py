@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import jsonschema
 
@@ -38,6 +38,7 @@ from .gateway import (
     parse_json_output,
 )
 from .memory import MemoryStore, redact_for_specialist
+from .verification import VERIFIERS, UnverifiableClaim
 
 log = logging.getLogger("nemoclaw.runner")
 
@@ -78,6 +79,10 @@ class QAGateFailed(StageFailed):
     """QA returned passed=false. Publishing must not proceed."""
 
 
+class ToolUnavailable(StageFailed):
+    """A stage needs an MCP server that is not registered. Fail rather than let it improvise."""
+
+
 @dataclass
 class RunState:
     run_id: str
@@ -101,6 +106,32 @@ class PipelineRunner:
     gateway: LiteLLMGateway
     memory: MemoryStore
     pm_agent_id: str = "pm"
+    # Injected so tests can pin it and so an unreachable gateway fails CLOSED (empty set = no
+    # tools available = every side-effect stage refuses to run).
+    available_tools: Callable[[], set[str]] | None = None
+
+    def _persist(self, state: RunState, status: str, paused_stage: str | None = None) -> None:
+        """Mirror run state into app.runs. Best-effort; MemoryStore swallows its own failures."""
+        saver = getattr(self.memory, "save_run", None)
+        if saver is None:
+            return
+        saver(
+            run_id=state.run_id,
+            client_id=state.client_id,
+            pipeline=state.pipeline_id,
+            status=status,
+            paused_stage=paused_stage,
+            resume_state=state.snapshot(),
+        )
+
+    def _tools_now(self) -> set[str]:
+        if self.available_tools is None:
+            return set()
+        try:
+            return set(self.available_tools())
+        except Exception:  # noqa: BLE001 - unreachable gateway means "nothing is available"
+            log.warning("MCP tool probe failed; treating all tools as unavailable")
+            return set()
 
     # ------------------------------------------------------------------ inputs
 
@@ -252,6 +283,7 @@ class PipelineRunner:
             state = RunState(run_id=run_id, client_id=client_id, pipeline_id=pipeline_id)
 
         self.gateway.close_run(state.run_id, status=RUN_RUNNING)
+        self._persist(state, RUN_RUNNING)
 
         skipping = start_after is not None
         for stage in pipeline.stages:
@@ -281,6 +313,7 @@ class PipelineRunner:
                 self.gateway.close_run(
                     state.run_id, status=RUN_PAUSED, output=state.snapshot()
                 )
+                self._persist(state, RUN_PAUSED, paused_stage=stage.id)
                 raise AwaitingHuman(state.run_id, stage.id)
 
             agent_id = stage.agent
@@ -295,6 +328,31 @@ class PipelineRunner:
             if not agent.enabled:
                 raise StageFailed(stage.id, f"agent '{agent.id}' is disabled in agents.yaml")
 
+            # ---- HARD PRE-FLIGHT: refuse a side-effect stage whose tools do not exist.
+            # The model is never called, so it never gets the chance to narrate a success it had
+            # no means to achieve. This is deterministic; no judgement involved.
+            if stage.requires_tools:
+                have = self._tools_now()
+                missing = [t for t in stage.requires_tools if t not in have]
+                if missing:
+                    reason = (
+                        f"required MCP server(s) not registered: {', '.join(missing)} "
+                        f"(available: {', '.join(sorted(have)) or 'none'})"
+                    )
+                    self.gateway.record(
+                        state.run_id, event_type="tool_unavailable", step_name=stage.id,
+                        data={"missing": missing, "available": sorted(have)},
+                    )
+                    self.gateway.say(
+                        state.run_id, role="system",
+                        content=f"[{stage.id}] BLOCKED before running — {reason}",
+                    )
+                    self.gateway.close_run(
+                        state.run_id, status=RUN_FAILED, output=state.snapshot()
+                    )
+                    self._persist(state, RUN_FAILED, paused_stage=stage.id)
+                    raise ToolUnavailable(stage.id, reason)
+
             payload = self._resolve_inputs(stage, state, task, client_ctx)
 
             try:
@@ -304,7 +362,63 @@ class PipelineRunner:
                     log.warning("stage '%s' failed but on_fail=skip", stage.id)
                     continue
                 self.gateway.close_run(state.run_id, status=RUN_FAILED, output=state.snapshot())
+                self._persist(state, RUN_FAILED, paused_stage=stage.id)
                 raise
+
+            # ---- INDEPENDENT VERIFICATION: go and check the claimed side effect ourselves.
+            # Schema validation proved the SHAPE was right. This proves the CLAIM was true. The
+            # check deliberately lives here and not in the agent that made the claim.
+            if stage.verify:
+                verifier = VERIFIERS[stage.verify]
+                result = verifier(output)
+                self.gateway.record(
+                    state.run_id,
+                    event_type="verification_passed" if result.ok else "verification_failed",
+                    step_name=stage.id,
+                    data={"verifier": stage.verify, "reason": result.reason,
+                          "evidence": result.evidence},
+                )
+                if not result.ok:
+                    self.gateway.say(
+                        state.run_id, role="system",
+                        content=f"[{stage.id}] VERIFICATION FAILED — the stage reported success "
+                                f"but it could not be confirmed: {result.reason}",
+                    )
+                    self.gateway.close_run(
+                        state.run_id, status=RUN_FAILED, output=state.snapshot()
+                    )
+                    self._persist(state, RUN_FAILED, paused_stage=stage.id)
+                    raise UnverifiableClaim(stage.id, result)
+                self.gateway.say(
+                    state.run_id, role="system",
+                    content=f"[{stage.id}] verified independently: {result.reason}",
+                )
+
+            # ---- PM backstop gate for pipelines with no QA stage. Same enforcement shape as QA:
+            # a boolean read by code, not a judgement the next stage can talk past.
+            if stage.gate == "pm_must_approve" and not output.get("approved_for_user", False):
+                reasons = output.get("concerns") or ["PM did not approve for user"]
+                self.gateway.record(
+                    state.run_id, event_type="pm_review_rejected", step_name=stage.id,
+                    data={"concerns": reasons, "unverified": output.get("unverified_claims")},
+                )
+                self.gateway.say(
+                    state.run_id, role="system",
+                    content=f"[{stage.id}] PM REVIEW REJECTED — not returned to user. "
+                            + "; ".join(reasons),
+                )
+                self.gateway.close_run(state.run_id, status=RUN_FAILED, output=state.snapshot())
+                self._persist(state, RUN_FAILED, paused_stage=stage.id)
+                raise StageFailed(stage.id, "; ".join(reasons))
+
+            # Surface anything PM flagged as unverifiable even when it approved — the user should
+            # see "I could not confirm X" rather than a clean-looking result.
+            if stage.gate == "pm_must_approve" and output.get("unverified_claims"):
+                self.gateway.say(
+                    state.run_id, role="system",
+                    content=f"[{stage.id}] PM flagged UNVERIFIED claims: "
+                            + "; ".join(output["unverified_claims"]),
+                )
 
             # ---- QA is a hard gate, evaluated by code not by the next agent's goodwill
             if stage.gate == "qa_must_pass" and not output.get("passed", False):
@@ -321,12 +435,14 @@ class PipelineRunner:
                             + "; ".join(output.get("reasons") or ["no reasons given"]),
                 )
                 self.gateway.close_run(state.run_id, status=RUN_FAILED, output=state.snapshot())
+                self._persist(state, RUN_FAILED, paused_stage=stage.id)
                 raise QAGateFailed(stage.id, "; ".join(output.get("reasons") or ["QA failed"]))
 
             state.outputs[stage.id] = output
             state.completed.append(stage.id)
 
         self.gateway.close_run(state.run_id, status=RUN_COMPLETED, output=state.snapshot())
+        self._persist(state, RUN_COMPLETED)
         return state
 
     # ------------------------------------------------------------------ resumption

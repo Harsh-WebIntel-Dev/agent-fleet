@@ -11,6 +11,11 @@
 #   inputs         — which prior stage outputs (+ client context keys) get injected
 #   output_schema  — JSON schema key from schemas.yaml; output is VALIDATED, not trusted
 #   gate           — optional. `human` pauses the run until a human approves in ClickUp.
+#   requires_tools — MCP servers that must be REGISTERED for the stage to run at all. Checked
+#                    before the model is called: an absent tool is a hard stop, not an invitation
+#                    to improvise. Mandatory on any stage producing a side-effect schema.
+#   verify         — independent post-hoc check that the claimed side effect really happened
+#                    (see orchestrator/verification.py). Mandatory alongside requires_tools.
 #   on_fail        — retry | abort | skip
 #
 # Stages never talk to each other directly. The runner passes validated output forward, and every
@@ -45,6 +50,10 @@ pipelines:
         agent: image
         inputs: [draft.output.title, draft.output.image_briefs, client.brand]
         output_schema: image_set
+        # No Higgsfield server -> this stage never runs, rather than inventing image URLs.
+        requires_tools: [higgsfield]
+        # Downloads each image and compares REAL header dimensions to the claimed ones.
+        verify: image_set
         on_fail: retry
 
       - id: qa
@@ -66,6 +75,9 @@ pipelines:
         agent: publisher
         inputs: [draft.output, seo_pass.output, images.output, client.wordpress]
         output_schema: publish_result
+        requires_tools: [wordpress]
+        # The runner fetches the returned URL itself. `published: true` proves nothing.
+        verify: publish_result
         on_fail: abort
 
   gmb_post:
@@ -92,16 +104,27 @@ pipelines:
         agent: gmb
         inputs: [compose.output, client.gmb]
         output_schema: publish_result
+        requires_tools: [gmb]
+        verify: publish_result
         on_fail: abort
 
   # A single-shot consult — PM answering a user question that needs specialist input.
   # No gate, no publish, nothing leaves the system. This is the path for
   # "PM needs specialist advice to answer the client".
   consult:
-    description: One specialist answers one question; PM relays. Read-only, no side effects.
+    description: One specialist answers one question; PM reviews, then relays. No side effects.
     stages:
       - id: answer
         agent: "{{ task.specialist }}"   # runner resolves from the PM's routing decision
         inputs: [task.question, client.brand]
         output_schema: consult_answer
         on_fail: retry
+
+      # No QA gate on this pipeline, so PM is the backstop before anything reaches the user.
+      # Enforced at config-load: any pipeline without a qa_must_pass gate MUST end in pm_review.
+      - id: pm_review
+        agent: pm
+        inputs: [answer.output, task.question, client.brand]
+        output_schema: pm_review
+        gate: pm_must_approve
+        on_fail: abort

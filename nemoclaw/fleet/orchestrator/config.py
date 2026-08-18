@@ -56,6 +56,13 @@ class Stage:
     output_schema: str | None
     gate: str | None
     on_fail: str
+    # Tools that must be REGISTERED IN LITELLM for this stage to be allowed to run at all.
+    # Checked before the model is called, so an absent tool is a hard failure rather than an
+    # invitation to improvise a plausible-looking result. See verification.py's header.
+    requires_tools: tuple[str, ...] = ()
+    # Key into verification.VERIFIERS. Runs AFTER schema validation and independently checks the
+    # claimed side effect actually happened.
+    verify: str | None = None
     approve_status: str | None = None
     reject_status: str | None = None
     rework_from: str | None = None
@@ -122,6 +129,8 @@ def _parse_stage(raw: dict[str, Any], pipeline_id: str) -> Stage:
         output_schema=raw.get("output_schema"),
         gate=raw.get("gate"),
         on_fail=raw.get("on_fail", "abort"),
+        requires_tools=tuple(raw.get("requires_tools") or ()),
+        verify=raw.get("verify"),
         approve_status=raw.get("approve_status"),
         reject_status=raw.get("reject_status"),
         rework_from=rework_from,
@@ -203,6 +212,45 @@ def _validate(reg: Registry) -> None:
                 problems.append(
                     f"pipeline '{p.id}' stage '{st.id}' has an agent but no output_schema"
                 )
+
+    # RULE (user, 2026-08-18): publishable work that does not pass the QA gate must be reviewed by
+    # PM before it goes back to the user. Enforced here rather than trusted to whoever edits
+    # pipelines.yaml next — a pipeline that can reach a user unreviewed is a defect, not a choice.
+    for p in reg.pipelines.values():
+        gates = {s.gate for s in p.stages}
+        if "qa_must_pass" not in gates and "pm_must_approve" not in gates:
+            problems.append(
+                f"pipeline '{p.id}' has neither a qa_must_pass nor a pm_must_approve gate — "
+                "its output could reach a user unreviewed. Add one."
+            )
+
+    # A stage that claims an external side effect MUST be both tool-gated and independently
+    # verified. Learned the hard way: `publisher` fabricated a complete publish_result — real-
+    # looking remote_id, real-looking URL — with no MCP server in existence, and it passed schema
+    # validation. Schemas check shape; only these two fields check truth. Enforced here so nobody
+    # can add an unverified publish stage later without tripping over it.
+    from .verification import VERIFIERS  # local import: avoids a cycle at module load
+
+    SIDE_EFFECT_SCHEMAS = {"publish_result", "image_set"}
+    for p in reg.pipelines.values():
+        for st in p.stages:
+            if st.verify and st.verify not in VERIFIERS:
+                problems.append(
+                    f"pipeline '{p.id}' stage '{st.id}' declares verify='{st.verify}' "
+                    f"which is not a known verifier. known: {sorted(VERIFIERS)}"
+                )
+            if st.output_schema in SIDE_EFFECT_SCHEMAS:
+                if not st.requires_tools:
+                    problems.append(
+                        f"pipeline '{p.id}' stage '{st.id}' produces '{st.output_schema}' (an "
+                        "external side effect) but declares no requires_tools — it could claim "
+                        "success with no tool wired. Declare the MCP server(s) it needs."
+                    )
+                if not st.verify:
+                    problems.append(
+                        f"pipeline '{p.id}' stage '{st.id}' produces '{st.output_schema}' but has "
+                        "no verify — its claim of success would be taken on trust."
+                    )
 
     for a in reg.agents.values():
         if not a.prompt_path.exists():

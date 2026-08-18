@@ -27,6 +27,7 @@ from typing import Any, Iterator, Sequence
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg.types.json import Json
 
 from .config import Agent
 
@@ -65,6 +66,64 @@ class MemoryStore:
             with conn.transaction():
                 conn.execute("SELECT set_config('app.client_id', %s, true)", (client_id,))
                 yield conn
+
+    # ---------------------------------------------------------------- run persistence
+
+    def save_run(
+        self,
+        *,
+        run_id: str,
+        client_id: str,
+        pipeline: str,
+        status: str,
+        paused_stage: str | None = None,
+        resume_state: dict[str, Any] | None = None,
+    ) -> None:
+        """Mirror a run's state into `app.runs`.
+
+        LiteLLM's ledger stays the source of truth for events, but it is a separate service and a
+        `close_run` snapshot is not a resume record. Until this existed, resuming a paused run
+        meant hand-reconstructing `outputs`/`completed` from the gateway snapshot — it worked, but
+        only because a human was driving it. Persisting here makes "what is awaiting approval for
+        client X" a query instead of a scan, and survives a gateway restart.
+
+        Best-effort by design: a bookkeeping failure must not kill a run that is otherwise fine,
+        so this logs and returns rather than raising.
+        """
+        try:
+            with self._client_session(client_id) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO app.runs
+                        (run_id, client_id, pipeline, status, paused_stage, resume_state)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (run_id) DO UPDATE SET
+                        status       = EXCLUDED.status,
+                        paused_stage = EXCLUDED.paused_stage,
+                        resume_state = EXCLUDED.resume_state,
+                        updated_at   = now()
+                    """,
+                    (run_id, client_id, pipeline, status, paused_stage,
+                     Json(resume_state or {})),
+                )
+        except Exception:  # noqa: BLE001 - see docstring: bookkeeping must not fail the run
+            log.exception("could not persist run %s", run_id)
+
+    def load_run(self, *, run_id: str, client_id: str) -> dict[str, Any] | None:
+        with self._client_session(client_id) as conn:
+            row = conn.execute(
+                "SELECT * FROM app.runs WHERE run_id = %s", (run_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def paused_runs(self, client_id: str) -> list[dict[str, Any]]:
+        """Everything currently sitting at a human gate for one client."""
+        with self._client_session(client_id) as conn:
+            rows = conn.execute(
+                "SELECT run_id, pipeline, paused_stage, updated_at FROM app.runs "
+                "WHERE status = 'paused' ORDER BY updated_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     # ---------------------------------------------------------------- guard
 
