@@ -72,6 +72,20 @@ model_list:
     litellm_params: *deepseek
     model_info: *deepseek_cost
 
+  # ---- Embeddings, for OpenClaw's memory vector index ----
+  # OpenClaw has native vector search (sqlite-vec + FTS) but needs an embedding backend. Routing
+  # it through LiteLLM keeps memory indexing spend on the same key/budget as everything else.
+  # bge-m3 is $0.02/M — memory reindexing is high-volume, so the cheap model matters here.
+  - model_name: embed
+    litellm_params:
+      model: openai/bge-m3
+      api_base: https://inference.do-ai.run/v1
+      api_key: os.environ/DO_INFERENCE_KEY
+    model_info:
+      mode: embedding
+      input_cost_per_token: 0.00000002   # $0.02/M in
+      output_cost_per_token: 0.0         # embeddings return vectors, not billed tokens out
+
   # OpenAI's OPEN-WEIGHT models. These are NOT partner models, so they are not caught by the
   # subscription-tier gate below — verified working 2026-08-18. Materially cheaper than deepseek
   # ($1.32/$3.96), so worth considering for high-volume, low-judgement stages once their honesty

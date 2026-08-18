@@ -39,6 +39,15 @@
     "defaults": {
       "model": {
         "primary": "litellm/standard"
+      },
+      "memorySearch": {
+        "enabled": true,
+        "provider": "openai-compatible",
+        "model": "embed",
+        "remote": {
+          "baseUrl": "http://litellm-v10up2yg1cwxo0k1ks9j2qro:4000/v1",
+          "apiKey": "${OPENCLAW_LITELLM_KEY}"
+        }
       }
     }
   }
