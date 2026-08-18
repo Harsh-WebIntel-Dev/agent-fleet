@@ -1,0 +1,45 @@
+{
+  "models": {
+    "providers": {
+      "litellm": {
+        "api": "openai-completions",
+        "apiKey": "${OPENCLAW_LITELLM_KEY}",
+        "baseUrl": "http://litellm-v10up2yg1cwxo0k1ks9j2qro:4000/v1",
+        "models": [
+          {
+            "id": "standard",
+            "name": "Standard (deepseek-v4-pro)",
+            "contextWindow": 1048576
+          },
+          {
+            "id": "fast",
+            "name": "Fast (deepseek-v4-pro)",
+            "contextWindow": 1048576
+          },
+          {
+            "id": "deep",
+            "name": "Deep (deepseek-v4-pro)",
+            "contextWindow": 1048576
+          },
+          {
+            "id": "oss-120b",
+            "name": "GPT-OSS 120B",
+            "contextWindow": 128000
+          },
+          {
+            "id": "oss-20b",
+            "name": "GPT-OSS 20B",
+            "contextWindow": 128000
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "litellm/standard"
+      }
+    }
+  }
+}
