@@ -3,35 +3,49 @@
     "providers": {
       "litellm": {
         "api": "openai-completions",
-        "apiKey": "${OPENCLAW_LITELLM_KEY}",
+        "apiKey": "${LITELLM_KEY_FLEET}",
         "baseUrl": "http://litellm-v10up2yg1cwxo0k1ks9j2qro:4000/v1",
         "models": [
           {
             "id": "standard",
-            "name": "Standard (deepseek-v4-pro)",
+            "name": "standard",
             "contextWindow": 1048576
           },
           {
             "id": "fast",
-            "name": "Fast (deepseek-v4-pro)",
+            "name": "fast",
             "contextWindow": 1048576
           },
           {
             "id": "deep",
-            "name": "Deep (deepseek-v4-pro)",
+            "name": "deep",
+            "contextWindow": 1048576
+          }
+        ],
+        "auth": "api-key"
+      },
+      "litellm-acme": {
+        "api": "openai-completions",
+        "apiKey": "${LITELLM_KEY_ACME}",
+        "baseUrl": "http://litellm-v10up2yg1cwxo0k1ks9j2qro:4000/v1",
+        "models": [
+          {
+            "id": "standard",
+            "name": "standard",
             "contextWindow": 1048576
           },
           {
-            "id": "oss-120b",
-            "name": "GPT-OSS 120B",
-            "contextWindow": 128000
+            "id": "fast",
+            "name": "fast",
+            "contextWindow": 1048576
           },
           {
-            "id": "oss-20b",
-            "name": "GPT-OSS 20B",
-            "contextWindow": 128000
+            "id": "deep",
+            "name": "deep",
+            "contextWindow": 1048576
           }
-        ]
+        ],
+        "auth": "api-key"
       }
     }
   },
@@ -46,7 +60,7 @@
         "model": "embed",
         "remote": {
           "baseUrl": "http://litellm-v10up2yg1cwxo0k1ks9j2qro:4000/v1",
-          "apiKey": "${OPENCLAW_LITELLM_KEY}"
+          "apiKey": "${LITELLM_KEY_FLEET}"
         }
       }
     }
