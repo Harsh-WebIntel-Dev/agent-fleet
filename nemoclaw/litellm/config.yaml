@@ -277,9 +277,6 @@ mcp_servers:
     auth_value: os.environ/SEMRUSH_API_KEY_HEADER
     access_groups: ["fleet_tools"]
 
-  # Self-hosted Postiz (our own infra). Covers Facebook, Instagram AND Google Business Profile —
-  # all three integrations are connected and live, so GMB posting rides on Postiz rather than
-  # needing a separate Google Business Profile API wrapper.
   # ClickUp — OFFICIAL first-party MCP server (mcp.clickup.com), 55 tools.
   #
   # INTERNAL TOOL, NOT CLIENT-FACING. This is the agency's own board, where PM tracks the work it
@@ -310,6 +307,9 @@ mcp_servers:
     auth_value: os.environ/CLICKUP_MCP_TOKEN
     access_groups: ["fleet_internal"]
 
+  # Self-hosted Postiz (our own infra). Covers Facebook, Instagram AND Google Business Profile —
+  # all three integrations are connected and live, so GMB posting rides on Postiz rather than
+  # needing a separate Google Business Profile API wrapper.
   postiz:
     url: https://postiz.widev.com.au/api/mcp
     transport: http
