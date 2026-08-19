@@ -280,6 +280,36 @@ mcp_servers:
   # Self-hosted Postiz (our own infra). Covers Facebook, Instagram AND Google Business Profile —
   # all three integrations are connected and live, so GMB posting rides on Postiz rather than
   # needing a separate Google Business Profile API wrapper.
+  # ClickUp — OFFICIAL first-party MCP server (mcp.clickup.com), 55 tools.
+  #
+  # INTERNAL TOOL, NOT CLIENT-FACING. This is the agency's own board, where PM tracks the work it
+  # is doing for clients. Clients never touch it — they get their own taskboard in the Hermes webui.
+  # Hence access_group "fleet_internal" rather than "fleet_tools": test-client keys have no business
+  # writing to real agency tasks.
+  #
+  # AUTH — why a static bearer rather than letting LiteLLM run the OAuth flow.
+  # ClickUp's MCP runs its OWN authorization server (issuer https://mcp.clickup.com), separate from
+  # the app.clickup.com OAuth described in their API docs, so a normal ClickUp API token is rejected.
+  # Its metadata advertises authorization_code + PKCE only, no client_credentials — the same shape
+  # that made SEMrush's OAuth unusable, because LiteLLM binds an OAuth token to the LiteLLM USER who
+  # approved in the browser, leaving every other fleet key Unauthorized.
+  #
+  # What rescues it here: the issued access token has expires_in 315360000 (~10 years) and NO
+  # refresh token, matching ClickUp's documented "the access token currently does not expire". So the
+  # authorization_code dance was run ONCE by hand (client mcp-client-7rE8PejU-2AVB0ma, registered via
+  # RFC 7591 dynamic registration) and the resulting token is used as a plain bearer, exactly like
+  # Postiz. No browser step for the fleet, and every client key works.
+  #
+  # Consequence to remember: the token carries the approving user's workspace access at scope
+  # "read write" — the only scope the server offers. There is no narrower option.
+  clickup:
+    url: https://mcp.clickup.com/mcp
+    transport: http
+    description: "Internal PM task management: ClickUp tasks, lists, comments, docs, chat, time"
+    auth_type: bearer_token
+    auth_value: os.environ/CLICKUP_MCP_TOKEN
+    access_groups: ["fleet_internal"]
+
   postiz:
     url: https://postiz.widev.com.au/api/mcp
     transport: http
