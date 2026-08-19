@@ -221,6 +221,12 @@ general_settings:
   #   * Deliberately NOT setting `supported_db_objects` — omitting an object type disables DB
   #     loading for it, and "agents" is not even a member of the accepted enum.
   store_model_in_db: true
+  # NOTE: PROXY_BASE_URL is deliberately NOT here. It is read from the ENVIRONMENT — setting it in
+  # general_settings does nothing (verified: absent from the container env afterwards). It is set
+  # as a compose env var instead. It controls the redirect_uri LiteLLM sends for MCP OAuth; without
+  # it the origin is inferred from whatever Host header arrives, so the URI LiteLLM REGISTERS via
+  # dynamic client registration can differ from the one it later SENDS, and the provider rejects
+  # the mismatch.
 
 # Per-client virtual keys are created via LiteLLM's /key/generate with:
 #   max_budget: <client dollar cap>, metadata: {client_id: <id>}, models: [<allowed aliases>]
@@ -244,6 +250,29 @@ mcp_servers:
     url: http://mcp-spaces-bsx4ax3q1uk3tcgq4pvqpxkb:8080/mcp
     transport: http
     description: "Client asset storage (DigitalOcean Spaces): list, read, write, presign, delete"
+    access_groups: ["fleet_tools"]
+
+  # SEMrush — the OFFICIAL MCP server (mcp.semrush.com), used per the official-servers-first rule.
+  #
+  # OAuth, not a static token. The authorization server advertises ONLY authorization_code and
+  # refresh_token — there is no client_credentials grant, so this cannot be authorised purely
+  # headlessly: a human must approve it once in a browser, after which LiteLLM refreshes.
+  #
+  # It is a PUBLIC client (token_endpoint_auth_method: none) using PKCE, so there is no
+  # client_secret to store or rotate.
+  #
+  # REDIRECT URI CONSTRAINT: SEMrush accepts ONLY localhost/127.0.0.1 redirects — a public HTTPS
+  # callback is rejected outright. LiteLLM has no public route anyway, so the browser step is done
+  # over an SSH tunnel to localhost:18791. Do not "fix" the redirect to a public URL; it will be
+  # refused at registration.
+  semrush:
+    url: https://mcp.semrush.com/v1/mcp
+    transport: http
+    description: "SEO research: keywords, backlinks, organic/competitor analysis, site audit"
+    auth_type: oauth2
+    oauth2_flow: authorization_code
+    client_id: os.environ/SEMRUSH_OAUTH_CLIENT_ID
+    scopes: ["mcp.access"]
     access_groups: ["fleet_tools"]
 
   # Self-hosted Postiz (our own infra). Covers Facebook, Instagram AND Google Business Profile —

@@ -11,6 +11,11 @@ services:
       - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
       - LANGFUSE_HOST=${LANGFUSE_HOST}
+      # Origin used to build the MCP OAuth redirect_uri. MUST match the address bar exactly, and
+      # must be the SAME for the dynamic-client-registration call and the later authorize call.
+      # localhost because SEMrush accepts ONLY localhost/127.0.0.1 redirects — a public HTTPS
+      # callback is refused at registration. Reach the UI over: ssh -L 18791:100.115.104.5:18791
+      - 'PROXY_BASE_URL=${PROXY_BASE_URL:-http://localhost:18791}'
       # MCP server credentials. config.yaml references these as os.environ/<NAME> under
       # mcp_servers. Each one registered here is a tool NemoClaw's layer-1 gate will permit.
       - POSTIZ_MCP_TOKEN=${POSTIZ_MCP_TOKEN}
