@@ -6,19 +6,22 @@ services:
   # their own volume. It is a different product from the fleet runtime (OpenClaw) — Hermes holds the
   # conversation, the fleet does the work.
   hermes-agent:
-    # DELIBERATELY NOT THE LATEST. hermes-agent v0.19.0 (= 2026.7.20) added a guard that refuses
-    # to be built as a wheel ("Building wheels or sdists for hermes-agent is not supported — use
-    # editable install"). hermes-webui's docker_init.bash installs the agent with
-    # `uv pip install "$_stage_src[all]"` — a wheel install — so every agent from 2026.7.20 onward
-    # crash-loops the webui.
+    # UPGRADED 2026-08-19 from v2026.7.7.2 (v0.18.2) — the pin is obsolete.
     #
-    # Upstream: nesquena/hermes-webui#6558 — CLOSED AS NOT PLANNED, labelled "requires upstream
-    # changes". Verified still unfixed in webui 0.51.680, whose docker_init.bash line ~467 is
-    # unchanged. So this is not a version we can upgrade our way out of.
+    # WHY IT WAS PINNED: hermes-agent v0.19.0+ refuses to be built as a wheel ("Building wheels or
+    # sdists for hermes-agent is not supported — use editable install"), and hermes-webui's
+    # docker_init.bash did `uv pip install "$_stage_src[all]"` — a wheel install — so every agent from
+    # v0.19.0 on crash-looped the webui. Upstream nesquena/hermes-webui#6558.
     #
-    # v2026.7.7.2 (2026-07-08) is the last release before the guard. Revisit when the upstream
-    # issue is actually fixed; until then, upgrading the agent breaks the webui.
-    image: 'nousresearch/hermes-agent:v2026.7.7.2'
+    # WHY IT IS FIXED: that issue closed 2026-07-29T20:51:57Z, one minute after webui v0.52.106 was
+    # published. docker_init.bash now does `uv pip install -e "$_stage_src[all]"` — an EDITABLE
+    # install, exactly what the agent demands. Verified against master before upgrading.
+    #
+    # WHY WE NEEDED THE UPGRADE: A2A. Hermes implements Agent2Agent v1.0 bidirectionally via a
+    # bundled plugin (agent card at /.well-known/agent-card.json, JSON-RPC 2.0 at POST /, plus
+    # a2a_discover/a2a_call tools). v0.18.2 does NOT ship it — verified: 85 bundled plugins, zero a2a.
+    # A2A is what lets PM and Hermes talk through LiteLLM's agent gateway instead of a custom shim.
+    image: 'nousresearch/hermes-agent:v2026.8.18'
     command: 'gateway run'
     restart: unless-stopped
     environment:
@@ -43,7 +46,13 @@ services:
       retries: 5
 
   hermes-webui:
-    image: 'ghcr.io/nesquena/hermes-webui:0.51.680'
+    # PINNED BY DIGEST = webui 0.52.247. The RELEASED 0.52.113 still wheel-builds the agent
+    # (`setuptools build_wheel`), which agent v0.19.0+ REFUSES — verified: it crash-looped here on
+    # 2026-08-19. The editable-install fix (`uv pip install -e` from a staged writable copy) is only
+    # in 0.52.247/master, not in any earlier release tag. Pinned by digest rather than `:latest` so a
+    # future recreate can't silently pull a newer, possibly-broken build onto this public service.
+    # NB: 0.52.247 is an exp/prerelease — the only webui that installs the A2A-capable agent today.
+    image: 'ghcr.io/nesquena/hermes-webui@sha256:d483b07b3c46d8e2258fdb2eee3c1de36172c1bb5c9955e3436a0fa05c99492b'
     depends_on:
       - hermes-agent
     restart: unless-stopped
