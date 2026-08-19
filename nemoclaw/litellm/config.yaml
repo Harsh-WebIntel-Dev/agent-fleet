@@ -310,6 +310,20 @@ mcp_servers:
   # Self-hosted Postiz (our own infra). Covers Facebook, Instagram AND Google Business Profile —
   # all three integrations are connected and live, so GMB posting rides on Postiz rather than
   # needing a separate Google Business Profile API wrapper.
+  # A2A notify — our own thin tool (agent-fleet/mcp-a2a) letting the PM agent message a client's
+  # Hermes through LiteLLM's A2A proxy. INTERNAL (fleet_internal): only fleet keys, never clients.
+  # The mcp-a2a server holds a LiteLLM key scoped to agents=[that client's Hermes]; the target Hermes
+  # is pinned here per client via static_headers x-hermes-agent-id, never chosen by the model. For
+  # more clients: one entry per client (own access_group + own x-hermes-agent-id), same shape as the
+  # per-client pattern the onboarding runbook describes.
+  a2a_notify:
+    url: http://mcp-a2a-tgeftaxvmbgs6p2epo0ka7ly:8080/mcp
+    transport: http
+    description: "Message the client's Hermes front-door (report done / ask the client)"
+    access_groups: ["fleet_internal"]
+    static_headers:
+      x-hermes-agent-id: d2fcc72c-8479-43d5-bb37-67d591af428a
+
   postiz:
     url: https://postiz.widev.com.au/api/mcp
     transport: http
