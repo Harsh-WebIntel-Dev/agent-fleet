@@ -1,0 +1,27 @@
+services:
+  # Thin MCP tool: lets the OpenClaw PM agent message a client's Hermes via LiteLLM's A2A proxy.
+  #
+  # Internal only — no FQDN, no published port, traefik disabled. It holds a LiteLLM key scoped
+  # (object_permission.agents) to ONLY this client's Hermes agent, so its blast radius is one tenant.
+  # The target Hermes is pinned per client by the x-hermes-agent-id header that LiteLLM sets on this
+  # client's mcp_servers entry (static_headers) — never chosen by the model. See server.py.
+  mcp-a2a:
+    image: mcp-a2a:0.1.0
+    restart: unless-stopped
+    environment:
+      - PORT=8080
+      - LITELLM_BASE=${LITELLM_BASE:-http://litellm-v10up2yg1cwxo0k1ks9j2qro:4000}
+      # LiteLLM key scoped to agents=[<this client's hermes>] ONLY. Coolify-managed secret.
+      - 'LITELLM_A2A_KEY=${LITELLM_A2A_KEY}'
+      # Single-client fallback target if no per-client x-hermes-agent-id header is set. For the
+      # multi-client rollout, drop this and pin per client via the LiteLLM entry's static_headers.
+      - A2A_TARGET_AGENT_ID=${A2A_TARGET_AGENT_ID:-}
+    labels:
+      - traefik.enable=false
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import socket,sys; s=socket.socket(); s.settimeout(4); sys.exit(s.connect_ex(('127.0.0.1',8080)))"]
+      interval: 20s
+      timeout: 8s
+      retries: 5
+      start_period: 20s
