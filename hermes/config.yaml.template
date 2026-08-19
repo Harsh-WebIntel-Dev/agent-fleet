@@ -1,0 +1,31 @@
+# Hermes Agent config — lives at ~/.hermes/config.yaml inside the container
+# (HERMES_HOME=/home/hermes/.hermes, on the shared `hermes-home` volume).
+#
+# Every model call is routed through the LiteLLM proxy rather than direct to a vendor, so the
+# client's budget, request logs and Langfuse traces all apply to Hermes exactly as they do to the
+# fleet. The api_key comes from OPENAI_API_KEY in the environment — the client's LiteLLM virtual
+# key — so a conversation can only ever spend that client's budget.
+
+providers:
+  litellm:
+    api: http://litellm-v10up2yg1cwxo0k1ks9j2qro:4000/v1
+    # discover_models: false — do NOT let Hermes enumerate /models. LiteLLM exposes every alias the
+    # key can reach (fleet tiers, embeddings, the tier-blocked partner models). Hermes should only
+    # ever offer the conversational ones, and an explicit list is also immune to the listing being
+    # slow on a loaded host.
+    discover_models: false
+    models:
+      - flash
+      - standard
+
+model_aliases:
+  # Default for client conversation. deepseek-v4-flash at $0.08/$0.25 per M is ~16x cheaper both
+  # ways than the pro tier — the right trade for a front-door that is high-turn and low-depth.
+  hermes-default:
+    model: flash
+    provider: litellm
+  # Escalation for a genuinely hard question, used sparingly. The fleet does the real work; Hermes
+  # should hand off rather than reason deeply on its own.
+  hermes-deep:
+    model: standard
+    provider: litellm

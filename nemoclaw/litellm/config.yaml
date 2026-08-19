@@ -72,6 +72,19 @@ model_list:
     litellm_params: *deepseek
     model_info: *deepseek_cost
 
+  # ---- Hermes conversational tier ----
+  # Hermes is the client-facing front-door: high turn count, low reasoning depth. deepseek-v4-flash
+  # is ~16x cheaper in / ~16x cheaper out than v4-pro ($0.08/$0.25 vs $1.32/$3.96), which matters
+  # when a client is chatting rather than the fleet producing deliverables.
+  - model_name: flash
+    litellm_params:
+      model: openai/deepseek-v4-flash-0731
+      api_base: https://inference.do-ai.run/v1
+      api_key: os.environ/DO_INFERENCE_KEY
+    model_info:
+      input_cost_per_token: 0.00000008    # $0.08/M in
+      output_cost_per_token: 0.000000252  # $0.252/M out
+
   # ---- Embeddings, for OpenClaw's memory vector index ----
   # OpenClaw has native vector search (sqlite-vec + FTS) but needs an embedding backend. Routing
   # it through LiteLLM keeps memory indexing spend on the same key/budget as everything else.

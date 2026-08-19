@@ -1,0 +1,63 @@
+services:
+  # Hermes Agent — the CLIENT-FACING front door for webintelligenz.
+  #
+  # One Hermes per client. This is deliberate: the client's LiteLLM virtual key lives here, so a
+  # conversation can only ever spend that client's budget, and their conversation history stays in
+  # their own volume. It is a different product from the fleet runtime (OpenClaw) — Hermes holds the
+  # conversation, the fleet does the work.
+  hermes-agent:
+    # Pinned to the latest stable tag rather than a sha256 digest: a digest pin is unreadable in
+    # review and gives no signal about how old it is. The template shipped a digest resolving to an
+    # older build.
+    image: 'nousresearch/hermes-agent:v2026.8.18'
+    command: 'gateway run'
+    restart: unless-stopped
+    environment:
+      - HERMES_HOME=/home/hermes/.hermes
+      - HERMES_UID=1000
+      - HERMES_GID=1000
+      # The LiteLLM virtual key for THIS client. Hermes reads OpenAI-compatible providers from
+      # env; config.yaml points the provider's base_url at the LiteLLM proxy, so every turn is
+      # budgeted, logged and traced like the rest of the fleet.
+      - 'OPENAI_API_KEY=${OPENAI_API_KEY}'
+    volumes:
+      - 'hermes-home:/home/hermes/.hermes'
+      - 'hermes-agent-src:/opt/hermes'
+    labels:
+      # No public route. Hermes holds a client key and their conversation history.
+      - traefik.enable=false
+    healthcheck:
+      test: ['CMD-SHELL', 'test -d /home/hermes/.hermes || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  hermes-webui:
+    image: 'ghcr.io/nesquena/hermes-webui:0.51.92'
+    depends_on:
+      - hermes-agent
+    restart: unless-stopped
+    environment:
+      - HERMES_WEBUI_HOST=0.0.0.0
+      - HERMES_WEBUI_PORT=8787
+      - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui
+      - WANTED_UID=1000
+      - WANTED_GID=1000
+      - 'HERMES_WEBUI_PASSWORD=${SERVICE_PASSWORD_HERMESWEBUI}'
+    volumes:
+      - 'hermes-home:/home/hermeswebui/.hermes'
+      - 'hermes-agent-src:/home/hermeswebui/.hermes/hermes-agent:ro'
+      - 'hermes-workspace:/workspace'
+    # Tailscale-only until the exposure question is settled. *.widev.com.au is a WILDCARD record
+    # onto this box's public IP, so a Coolify FQDN is internet-facing the instant the container
+    # starts — and this UI reaches an agent holding a client's key. Password auth alone is not
+    # enough to justify that by default.
+    ports:
+      - '100.115.104.5:18793:8787'
+    labels:
+      - traefik.enable=false
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://127.0.0.1:8787/health']
+      interval: 30s
+      timeout: 5s
+      retries: 3
