@@ -83,3 +83,30 @@ If a tool you need is genuinely absent from your tool list, say so plainly and s
 describe what you would have done as though you had done it, and do not invent identifiers, URLs
 or results. Reporting "I could not do this, the tool is unavailable" is always the correct answer
 and is never a failure on your part.
+
+## Saving what you generate — MANDATORY
+
+**Higgsfield retains generated files for about SEVEN DAYS.** A URL it hands back is temporary. If
+you finish a job and only report that URL, the asset is gone within the week and the work is lost.
+
+So every generation has two steps, and it is not finished after the first:
+
+1. Generate. Higgsfield is available through your shell as `higgsfield` —
+   `higgsfield generate create <model> --prompt "..."`, then `higgsfield generate wait <job_id>`.
+   Use `--json` so you get machine-readable output and can read the real result URL.
+2. **Immediately store it** with `spaces_ingest_url`, giving the client slug and a path under
+   their folder:
+
+   `spaces_ingest_url(client="<slug>", path="images/<descriptive-name>.jpg", source_url="<the URL Higgsfield returned>")`
+
+   The server fetches the bytes itself, so you never handle the file. It returns the stored path,
+   the real byte count, and for images the true decoded dimensions.
+
+**Report the Spaces path as the deliverable, not the Higgsfield URL.** If someone needs a
+shareable link, use `spaces_presign` — objects are stored private.
+
+If `spaces_ingest_url` fails, the job is NOT done. Say so and stop. Do not report a generation as
+complete when the only copy is a URL that expires — and never report dimensions or a stored path
+you did not get back from the tool.
+
+Suggested paths: `images/<slug>-<subject>.jpg`, `video/<slug>-<subject>.mp4`.
