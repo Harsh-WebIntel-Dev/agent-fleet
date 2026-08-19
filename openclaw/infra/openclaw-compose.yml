@@ -1,7 +1,5 @@
 services:
   openclaw:
-    # Pinned, not ':latest' — 2026.7.1-2 (2026-08-13) is the newest stable build and is what
-    # ':latest' currently resolves to. The Coolify template shipped 2026.2.6 (February).
     image: 'coollabsio/openclaw:2026.7.1-2'
     environment:
       - AUTH_USERNAME=$SERVICE_USER_OPENCLAW
@@ -54,18 +52,14 @@ services:
       - SLACK_APP_TOKEN=$SLACK_APP_TOKEN
       - WHATSAPP_ENABLED=$WHATSAPP_ENABLED
       - OPENCLAW_DOCKER_APT_PACKAGES=$OPENCLAW_DOCKER_APT_PACKAGES
-      # Merged into /data/.openclaw/openclaw.json by /app/scripts/configure.js on every boot.
-      # This is the supported extension point - it defines a custom 'litellm' provider so ALL
-      # model traffic routes through the LiteLLM proxy (spend, logs and Langfuse traces in one
-      # place) instead of going direct to a vendor.
       - 'OPENCLAW_CONFIG_JSON=${OPENCLAW_CONFIG_JSON}'
+      # Runs on every boot: installs the Higgsfield CLI into the persistent volume (/data) and
+      # links the credential path. Supported entrypoint hook — no custom image, and it re-runs
+      # after a container recreate, which /root-based state would not survive.
+      - 'OPENCLAW_DOCKER_INIT_SCRIPT=${OPENCLAW_DOCKER_INIT_SCRIPT:-/data/init/setup-tools.sh}'
     ports:
       - '100.115.104.5:18792:8080'
     labels:
-      # OpenClaw must never be internet-facing: it holds provider credentials and can drive a
-      # browser. Tailscale (100.115.104.5:18792) is the ONLY intended access path. NOTE: *.widev.com.au
-      # is a WILDCARD DNS record pointing at this box's public IP, so any leftover Coolify FQDN
-      # would be publicly routable the moment this container starts.
       - traefik.enable=false
     volumes:
       - 'openclaw-data:/data'
