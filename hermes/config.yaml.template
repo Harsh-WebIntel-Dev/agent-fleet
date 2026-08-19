@@ -9,6 +9,22 @@
 # Alternatives to key_env, per the Hermes docs: an inline `api_key` (do not — it puts the secret in
 # config) or `key_cmd` to mint a token dynamically (useful later if keys become short-lived).
 
+# ── Default model ─────────────────────────────────────────────────────
+# DECISION (user, 2026-08-19): webintelligenz's Hermes runs on deepseek flash.
+#
+# These two top-level keys are what Hermes actually reads for its default (config.get("model") /
+# config.get("provider")). model_aliases below are NOT a default — they are named shortcuts. With
+# these keys absent, Hermes sent no Authorization header and every turn failed
+# `HTTP 401: Missing Authentication header`, working only when `--provider litellm -m flash` was
+# passed explicitly. That made the CLI look broken and would have broken the webui path too.
+#
+# `hermes model` is the intended way to set this but is interactive-only, so it is set in config.
+#
+# Verified live via LiteLLM spend logs: model deepseek-v4-flash-0731, team client-webintelligenz,
+# real non-zero spend — so the model, the per-client attribution and the budget path all hold.
+model: flash
+provider: litellm
+
 providers:
   litellm:
     api: http://litellm-v10up2yg1cwxo0k1ks9j2qro:4000/v1
