@@ -6,10 +6,19 @@ services:
   # their own volume. It is a different product from the fleet runtime (OpenClaw) — Hermes holds the
   # conversation, the fleet does the work.
   hermes-agent:
-    # Pinned to the latest stable tag rather than a sha256 digest: a digest pin is unreadable in
-    # review and gives no signal about how old it is. The template shipped a digest resolving to an
-    # older build.
-    image: 'nousresearch/hermes-agent:v2026.8.18'
+    # DELIBERATELY NOT THE LATEST. hermes-agent v0.19.0 (= 2026.7.20) added a guard that refuses
+    # to be built as a wheel ("Building wheels or sdists for hermes-agent is not supported — use
+    # editable install"). hermes-webui's docker_init.bash installs the agent with
+    # `uv pip install "$_stage_src[all]"` — a wheel install — so every agent from 2026.7.20 onward
+    # crash-loops the webui.
+    #
+    # Upstream: nesquena/hermes-webui#6558 — CLOSED AS NOT PLANNED, labelled "requires upstream
+    # changes". Verified still unfixed in webui 0.51.680, whose docker_init.bash line ~467 is
+    # unchanged. So this is not a version we can upgrade our way out of.
+    #
+    # v2026.7.7.2 (2026-07-08) is the last release before the guard. Revisit when the upstream
+    # issue is actually fixed; until then, upgrading the agent breaks the webui.
+    image: 'nousresearch/hermes-agent:v2026.7.7.2'
     command: 'gateway run'
     restart: unless-stopped
     environment:
@@ -24,7 +33,8 @@ services:
       - 'hermes-home:/home/hermes/.hermes'
       - 'hermes-agent-src:/opt/hermes'
     labels:
-      # No public route. Hermes holds a client key and their conversation history.
+      # The AGENT stays internal. Only the webui is public — the gateway itself must never be
+      # directly reachable from the internet.
       - traefik.enable=false
     healthcheck:
       test: ['CMD-SHELL', 'test -d /home/hermes/.hermes || exit 1']
@@ -33,7 +43,7 @@ services:
       retries: 5
 
   hermes-webui:
-    image: 'ghcr.io/nesquena/hermes-webui:0.51.92'
+    image: 'ghcr.io/nesquena/hermes-webui:0.51.680'
     depends_on:
       - hermes-agent
     restart: unless-stopped
@@ -48,14 +58,17 @@ services:
       - 'hermes-home:/home/hermeswebui/.hermes'
       - 'hermes-agent-src:/home/hermeswebui/.hermes/hermes-agent:ro'
       - 'hermes-workspace:/workspace'
-    # Tailscale-only until the exposure question is settled. *.widev.com.au is a WILDCARD record
-    # onto this box's public IP, so a Coolify FQDN is internet-facing the instant the container
-    # starts — and this UI reaches an agent holding a client's key. Password auth alone is not
-    # enough to justify that by default.
+    # PUBLIC — client-facing by decision (2026-08-19). Reachable at wi-agent.widev.com.au.
+    #
+    # SECURITY POSTURE, stated plainly because it is the whole control surface:
+    # HERMES_WEBUI_PASSWORD is the ONLY thing between the internet and an agent holding this
+    # client's LiteLLM key and their conversation history. There is no IP allowlist, no SSO and no
+    # second factor. Anyone who discovers the hostname reaches the login page. The blast radius is
+    # bounded by the key being per-client and budget-capped ($50/30d), not by the network.
+    #
+    # The Tailscale bind below is kept as a separate admin path that does not depend on Traefik.
     ports:
       - '100.115.104.5:18793:8787'
-    labels:
-      - traefik.enable=false
     healthcheck:
       test: ['CMD', 'curl', '-f', 'http://127.0.0.1:8787/health']
       interval: 30s

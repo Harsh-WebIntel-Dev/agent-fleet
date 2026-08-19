@@ -35,14 +35,45 @@ embeddings and the tier-blocked partner models. Hermes should only offer the con
 is internet-facing the moment the container starts, and this UI reaches an agent holding a client's
 key and their conversation history.
 
-Currently Tailscale-only: `http://100.115.104.5:18793`, `traefik.enable=false`.
+**PUBLIC by decision (2026-08-19):** `https://wi-agent.widev.com.au` — 302 to the login page.
+`http://100.115.104.5:18793` is kept as an admin path that does not depend on Traefik.
 
-If the client is meant to reach it, restoring the FQDN is a deliberate decision, and
-`HERMES_WEBUI_PASSWORD` would be the **only** control — anyone who finds the hostname reaches the
-login page.
+`HERMES_WEBUI_PASSWORD` (31 chars) is the **only** control. No IP allowlist, no SSO, no second
+factor — anyone who finds the hostname reaches the login page. Blast radius is bounded by the key
+being per-client and budget-capped ($50/30d), not by the network.
 
-## Still required
-- **"Connect to Predefined Networks"** — currently `false`; without it Hermes cannot resolve
-  LiteLLM. UI-only on Coolify 4.1.2.
-- Drop `config.yaml` into the `hermes-home` volume, then verify a turn bills the
-  `client-webintelligenz` key and no other.
+Note the stored FQDN reads `https://wi-agent.widev.com.au:8787`; the `:8787` is Coolify's internal
+port notation, not a listening port. The public URL is the plain hostname — `:8787` returns 000.
+
+## Version pinning — do not "upgrade to latest" without reading this
+
+`hermes-agent` is pinned to **v2026.7.7.2 (v0.18.2)** deliberately, NOT the latest.
+
+hermes-agent **v0.19.0 (2026.7.20)** added a guard in `setup.py`:
+`"Building wheels or sdists for hermes-agent is not supported. Use editable install instead."`
+hermes-webui's `docker_init.bash` installs the agent with `uv pip install "$_stage_src[all]"` — a
+wheel install — so **every agent from 2026.7.20 onward crash-loops the webui**.
+
+Upstream: [nesquena/hermes-webui#6558](https://github.com/nesquena/hermes-webui/issues/6558),
+**closed as not planned**, labelled "requires upstream changes". Verified still unfixed in webui
+`0.51.680`, whose `docker_init.bash` line ~467 is unchanged. Upgrading the webui does not help;
+only pinning the agent below 2026.7.20 does.
+
+### Two traps that made this hard to diagnose
+
+1. **The named volume shadows the image.** `hermes-agent-src:/opt/hermes` only populates when
+   empty, so downgrading the image changed nothing — `hermes --version` still reported the NEW
+   version while the image tag said otherwise. The volume must be removed for a version change to
+   take effect: `docker volume rm <service>_hermes-agent-src`. Never remove `hermes-home` — it
+   holds `config.yaml`, auth and sessions.
+2. **Permissions after any volume reset.** The agent repopulates `/opt/hermes` as root with files
+   the webui (which drops to uid 1000) cannot read, and its rsync fails with
+   `code 23 / Failed to stage hermes-agent source`. Fix:
+   `docker exec <agent> chmod -R a+rX /opt/hermes`, then restart the webui. **Re-run this after
+   every source-volume reset.**
+
+## Verified working 2026-08-19
+- agent healthy on v2026.7.7.2, webui healthy on 0.51.680
+- `https://wi-agent.widev.com.au` -> 302 (login), Tailscale 18793 -> 302
+- a real turn billed `client-webintelligenz` $0.000000 -> $0.001207 while the fleet and acme keys
+  stayed flat — ~$0.0012/turn on flash vs ~$0.023-0.038 on the fleet's pro tier

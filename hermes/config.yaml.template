@@ -5,10 +5,17 @@
 # client's budget, request logs and Langfuse traces all apply to Hermes exactly as they do to the
 # fleet. The api_key comes from OPENAI_API_KEY in the environment — the client's LiteLLM virtual
 # key — so a conversation can only ever spend that client's budget.
+#
+# Alternatives to key_env, per the Hermes docs: an inline `api_key` (do not — it puts the secret in
+# config) or `key_cmd` to mint a token dynamically (useful later if keys become short-lived).
 
 providers:
   litellm:
     api: http://litellm-v10up2yg1cwxo0k1ks9j2qro:4000/v1
+    # key_env references an env var by NAME rather than inlining the secret. A custom-named
+    # provider does NOT pick up OPENAI_API_KEY implicitly — that only feeds the built-in openai
+    # provider. Without this Hermes sends the literal string "no-key-required" and LiteLLM 401s.
+    key_env: OPENAI_API_KEY
     # discover_models: false — do NOT let Hermes enumerate /models. LiteLLM exposes every alias the
     # key can reach (fleet tiers, embeddings, the tier-blocked partner models). Hermes should only
     # ever offer the conversational ones, and an explicit list is also immune to the listing being
