@@ -73,48 +73,113 @@ mcp = MCPServer(
 
 _PRIVATE_REFUSED = "refusing to fetch a non-public address"
 
+# PRIMARY control against SSRF. This tool exists to ingest GENERATED MEDIA from known providers,
+# not to fetch arbitrary URLs, so an allowlist is both stronger and more honest than trying to make
+# arbitrary-URL fetching safe. Suffix match on the registered domain.
+ALLOWED_HOSTS = tuple(
+    h.strip().lower()
+    for h in os.environ.get(
+        "SPACES_INGEST_ALLOWED_HOSTS",
+        "cloudfront.net,higgsfield.ai,postiz.widev.com.au,digitaloceanspaces.com",
+    ).split(",")
+    if h.strip()
+)
+
+
+def _addr_is_forbidden(addr: ipaddress._BaseAddress) -> str | None:
+    """Every category that must never be reachable. Returns a reason, or None if the address is fine."""
+    # IPv4-mapped IPv6 (::ffff:169.254.169.254) would otherwise slip past the v6 checks entirely.
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        addr = mapped
+    for flag in ("is_private", "is_loopback", "is_link_local", "is_reserved",
+                 "is_unspecified", "is_multicast"):
+        if getattr(addr, flag, False):
+            return f"{_PRIVATE_REFUSED} ({addr}, {flag})"
+    return None
+
+
+def _resolve_and_validate(host: str) -> tuple[list[str], str | None]:
+    """Resolve a host and validate EVERY address it maps to. Returns (validated_ips, error)."""
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        return [], f"host does not resolve ({exc})"
+    ips: list[str] = []
+    for info in infos:
+        raw = info[4][0]
+        try:
+            addr = ipaddress.ip_address(raw)
+        except ValueError:
+            return [], f"unparseable address {raw!r}"
+        reason = _addr_is_forbidden(addr)
+        if reason:
+            return [], reason
+        ips.append(raw)
+    return ips, None
+
 
 def _is_public_url(url: str) -> tuple[bool, str]:
-    """Reject anything that is not a publicly-resolvable http(s) URL.
-
-    The SSRF guard matters here specifically: this server sits on the internal Docker network with
-    reachability to LiteLLM, Postgres and the OpenClaw gateway. A crafted source_url pointing at
-    169.254.169.254 or an internal host would otherwise make this a confused deputy.
-    """
+    """Scheme, allowlist and DNS checks. NOT sufficient alone — see _fetch for the rebinding guard."""
     try:
         parsed = urlparse(url)
     except ValueError as exc:
         return False, f"unparseable URL ({exc})"
     if parsed.scheme not in ("http", "https"):
         return False, f"scheme '{parsed.scheme}' is not http(s)"
-    host = parsed.hostname
+    host = (parsed.hostname or "").lower()
     if not host:
         return False, "URL has no host"
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror as exc:
-        return False, f"host does not resolve ({exc})"
-    for info in infos:
-        addr = ipaddress.ip_address(info[4][0])
-        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
-            return False, f"{_PRIVATE_REFUSED} ({addr})"
-    return True, "public http(s) URL"
+    if ALLOWED_HOSTS and not any(host == a or host.endswith("." + a) for a in ALLOWED_HOSTS):
+        return False, (f"host '{host}' is not an allowed media source "
+                       f"(allowed: {', '.join(ALLOWED_HOSTS)})")
+    _, err = _resolve_and_validate(host)
+    if err:
+        return False, err
+    return True, "allowed public http(s) URL"
+
+
+class _PinnedTransport(httpx.HTTPTransport):
+    """Re-checks the PEER ADDRESS after the socket is connected.
+
+    Closes the DNS-rebinding TOCTOU that a pre-flight getaddrinfo cannot: the guard resolves the
+    name, then httpx resolves it again when connecting, and an attacker controlling DNS can answer
+    differently the second time. Validating the address we ACTUALLY connected to removes the window
+    — there is no second resolution to poison after this point.
+    """
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        response = super().handle_request(request)
+        sock = response.extensions.get("network_stream")
+        peer = sock.get_extra_info("server_addr") if sock is not None else None
+        if peer:
+            try:
+                addr = ipaddress.ip_address(peer[0])
+            except ValueError:
+                addr = None
+            if addr is not None:
+                reason = _addr_is_forbidden(addr)
+                if reason:
+                    response.close()
+                    raise httpx.RequestError(f"connection landed on a forbidden address: {reason}")
+        return response
 
 
 def _fetch(url: str) -> httpx.Response:
-    """GET a URL, re-checking every redirect hop against the same guard.
+    """GET a URL through the pinned transport, re-checking every redirect hop.
 
-    follow_redirects=False on purpose — an open redirect on a public host would otherwise be a way
-    back into the private network.
+    follow_redirects=False on purpose: an open redirect on an allowed host would otherwise be a
+    route back into the private network, so each hop is validated before it is followed.
     """
-    with httpx.Client(timeout=FETCH_TIMEOUT, follow_redirects=False) as c:
+    with httpx.Client(timeout=FETCH_TIMEOUT, follow_redirects=False,
+                      transport=_PinnedTransport()) as c:
         resp = c.get(url, headers={"User-Agent": "NemoClaw-Spaces/1.0"})
         hops = 0
         while resp.is_redirect and hops < 5:
             nxt = str(resp.next_request.url) if resp.next_request else ""
             ok, why = _is_public_url(nxt)
             if not ok:
-                raise httpx.RequestError(f"redirect to non-public target: {why}")
+                raise httpx.RequestError(f"redirect to disallowed target: {why}")
             resp = c.get(nxt, headers={"User-Agent": "NemoClaw-Spaces/1.0"})
             hops += 1
         return resp
