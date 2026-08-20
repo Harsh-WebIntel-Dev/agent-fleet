@@ -325,8 +325,22 @@ mcp_servers:
     transport: http
     description: "Message the client's Hermes front-door (report done / ask the client)"
     access_groups: ["fleet_internal"]
+    allowed_tools: ["notify_client_hermes"]
     static_headers:
       x-hermes-agent-id: d2fcc72c-8479-43d5-bb37-67d591af428a
+
+  # Hermes -> PM synchronous comms. Same mcp-a2a server, but a SEPARATE entry so it exposes ONLY
+  # ask_pm (allowed_tools) to the HERMES key (access_group hermes_comms) — Hermes never sees the
+  # fleet's notify tool. x-client-slug pins which client PM answers for, per client, never the model.
+  pm_comms:
+    url: http://mcp-a2a-tgeftaxvmbgs6p2epo0ka7ly:8080/mcp
+    transport: http
+    description: "Ask the fleet PM a question on the client's behalf (Hermes front-door)"
+    access_groups: ["hermes_comms"]
+    allowed_tools: ["ask_pm"]
+    static_headers:
+      x-client-slug: webintelligenz
+
 
   postiz:
     url: https://postiz.widev.com.au/api/mcp
