@@ -335,9 +335,9 @@ mcp_servers:
   pm_comms:
     url: http://mcp-a2a-tgeftaxvmbgs6p2epo0ka7ly:8080/mcp
     transport: http
-    description: "Ask the fleet PM a question on the client's behalf (Hermes front-door)"
+    description: "Ask the fleet PM a question (ask_pm) or hand it a work task (create_pm_task) on the client's behalf"
     access_groups: ["hermes_comms"]
-    allowed_tools: ["ask_pm"]
+    allowed_tools: ["ask_pm", "create_pm_task"]
     static_headers:
       x-client-slug: webintelligenz
 

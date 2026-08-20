@@ -27,6 +27,7 @@ So the tenant is fixed by config + gateway ACL at two layers, never by PM.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import urllib.request
@@ -45,9 +46,12 @@ REPLY_TIMEOUT = float(os.environ.get("A2A_REPLY_TIMEOUT", "120"))
 mcp = MCPServer(
     name="a2a",
     instructions=(
-        "Message the client's Hermes front-door. Use notify_client_hermes to tell the client's Hermes "
-        "that work is done or to ask the client a question. You do NOT choose which client — the "
-        "gateway is bound to the acting client. Report only what Hermes actually returns."
+        "Bridge between a client's Hermes front-door and the fleet PM. Tools (each caller sees only the "
+        "ones its gateway key allows): notify_client_hermes — PM tells the client's Hermes that work is "
+        "done or asks the client something; ask_pm — Hermes asks the PM a question and gets a synchronous "
+        "answer; create_pm_task — Hermes hands the PM a new WORK request as an async task. You NEVER "
+        "choose which client — the gateway binds the acting client. Report only real results; never claim "
+        "work that did not happen."
     ),
 )
 
@@ -132,6 +136,17 @@ PM_MODEL = os.environ.get("PM_MODEL", "openclaw/pm")
 PM_TIMEOUT = float(os.environ.get("PM_TIMEOUT", "180"))
 DEFAULT_CLIENT_SLUG = os.environ.get("CLIENT_SLUG", "")
 
+# --- create_pm_task (Hermes -> PM ASYNC work intake via OpenClaw /hooks/agent) --------------------
+# For WORK requests (not questions). Dispatches an isolated PM agent turn and returns immediately with
+# a runId; PM triages/executes in the background and reports back via notify_client_hermes.
+# AUTH note (proven the hard way): the /hooks nginx location has NO Basic auth and forwards the token,
+# but the gateway treats an `Authorization: Bearer` as a GATEWAY-token attempt (401 via nginx), so the
+# HOOK token MUST be sent as `x-openclaw-token`. The target PM agent is pinned by PM_AGENT_ID +
+# gateway hooks.allowedAgentIds, never chosen by the model.
+OPENCLAW_HOOK_TOKEN = os.environ.get("OPENCLAW_HOOK_TOKEN", "")
+PM_AGENT_ID = os.environ.get("PM_AGENT_ID", "pm")
+HOOK_TIMEOUT = float(os.environ.get("HOOK_TIMEOUT", "30"))
+
 
 def _client_slug(ctx: Context) -> str:
     """Which client this Hermes speaks for — pinned by the gateway (x-client-slug), never the model."""
@@ -184,6 +199,66 @@ def ask_pm(ctx: Context, question: str) -> dict[str, Any]:
             return {"ok": False, "error": "no_answer", "detail": "PM returned no content"}
         return {"ok": True, "client": slug, "answer": answer}
     except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": type(exc).__name__, "detail": str(exc)[:300]}
+
+
+@mcp.tool()
+def create_pm_task(ctx: Context, title: str, details: str = "") -> dict[str, Any]:
+    """Hand the fleet PM a NEW WORK REQUEST from the client as a durable, asynchronous task.
+
+    Use this when the client wants WORK done — a blog post, a page, a change, a campaign. For a
+    QUESTION the client wants answered now, use ask_pm instead; do NOT create a task for a question.
+    Returns immediately with a task reference (the work is NOT done synchronously). PM triages and
+    executes in the background and will update this client's Hermes via a notification when there is
+    progress or a result — so tell the client their request has been logged, not that it is finished.
+    """
+    try:
+        if not OPENCLAW_HOOK_TOKEN:
+            return {"ok": False, "error": "not_configured", "detail": "OPENCLAW_HOOK_TOKEN is unset"}
+        if not (title or "").strip():
+            return {"ok": False, "error": "empty_title", "detail": "title is required"}
+        slug = _client_slug(ctx)
+        msg = (
+            f"New work request relayed from the Hermes front-door for client '{slug or 'unknown'}'.\n"
+            f"Title: {title}\n"
+            f"Details: {details or '(none provided)'}\n\n"
+            "Record this as a tracked task for THIS client and begin triage per the fleet's normal "
+            "process. Do only what you can verify — never claim work you did not actually do. When the "
+            "task is complete, or if you need input from the client, use notify_client_hermes to update "
+            "this client's Hermes."
+        )
+        # Content-derived idempotency key: identical resubmissions (e.g. a Hermes retry) reuse the same
+        # PM run instead of launching a duplicate; genuinely different requests get their own run.
+        idem = "task-" + hashlib.sha256(f"{slug}|{title}|{details}".encode()).hexdigest()[:24]
+        body = {
+            "message": msg,
+            "agentId": PM_AGENT_ID,  # pinned; gateway hooks.allowedAgentIds also restricts to PM
+            "name": f"ClientTask:{slug or 'unknown'}",
+            "idempotencyKey": idem,
+            "deliver": False,  # result returns via notify_client_hermes, not a delivery channel
+        }
+        req = urllib.request.Request(
+            f"{OPENCLAW_URL}/hooks/agent",
+            data=json.dumps(body).encode(),
+            # HOOK token as x-openclaw-token (NOT Authorization Bearer — see module note above).
+            headers={"x-openclaw-token": OPENCLAW_HOOK_TOKEN, "Content-Type": "application/json"},
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=HOOK_TIMEOUT)
+            payload = json.loads(resp.read().decode() or "{}")
+        except urllib.error.HTTPError as exc:
+            return {"ok": False, "error": f"hook_http_{exc.code}", "detail": exc.read().decode()[:300]}
+        if not payload.get("ok", False):
+            return {"ok": False, "error": "hook_rejected", "detail": str(payload)[:300]}
+        return {
+            "ok": True,
+            "dispatched": True,
+            "task_ref": payload.get("runId"),
+            "client": slug,
+            "note": "Logged with the PM. You will hear back through this Hermes when there is progress "
+                    "or a result — the work is not done yet.",
+        }
+    except Exception as exc:  # noqa: BLE001 - report failure as data, never a fake success
         return {"ok": False, "error": type(exc).__name__, "detail": str(exc)[:300]}
 
 

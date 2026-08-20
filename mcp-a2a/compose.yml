@@ -6,7 +6,7 @@ services:
   # The target Hermes is pinned per client by the x-hermes-agent-id header that LiteLLM sets on this
   # client's mcp_servers entry (static_headers) — never chosen by the model. See server.py.
   mcp-a2a:
-    image: mcp-a2a:0.2.0
+    image: mcp-a2a:0.3.0
     restart: unless-stopped
     environment:
       - PORT=8080
@@ -24,6 +24,10 @@ services:
       - 'OPENCLAW_BASIC_PASS=${OPENCLAW_BASIC_PASS}'
       - PM_MODEL=${PM_MODEL:-openclaw/pm}
       - CLIENT_SLUG=${CLIENT_SLUG:-webintelligenz}
+      # create_pm_task -> OpenClaw /hooks/agent (async work intake). OPENCLAW_HOOK_TOKEN is OpenClaw's
+      # dedicated hooks.token — set in THIS service's Coolify env (kept out of source).
+      - 'OPENCLAW_HOOK_TOKEN=${OPENCLAW_HOOK_TOKEN}'
+      - PM_AGENT_ID=${PM_AGENT_ID:-pm}
     labels:
       - traefik.enable=false
     healthcheck:
