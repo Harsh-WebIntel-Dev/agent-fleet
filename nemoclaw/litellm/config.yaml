@@ -53,7 +53,11 @@ model_list:
 
   - model_name: fast
     litellm_params: &deepseek
-      model: openai/deepseek-v4-pro
+      # PINNED to -0813 (2026-08-20): DO's UNPINNED `deepseek-v4-pro` alias started TIMING OUT
+      # (60-180s, verified direct against inference.do-ai.run) while the dated pin responds in ~2s.
+      # Same trap as flash — always use DO's dated pin, never the floating alias. Pricing unchanged
+      # ($1.32/$3.96 per M was already the 0813 rate; the old $0.87/$1.74 alias price is gone).
+      model: openai/deepseek-v4-pro-0813
       api_base: https://inference.do-ai.run/v1
       api_key: os.environ/DO_INFERENCE_KEY
     model_info: &deepseek_cost
