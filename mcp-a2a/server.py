@@ -118,6 +118,75 @@ def notify_client_hermes(ctx: Context, message: str, expect_reply: bool = True) 
         return {"ok": False, "error": type(exc).__name__, "detail": str(exc)[:300]}
 
 
+import base64
+
+# --- ask_pm (Hermes -> PM synchronous comms) ------------------------------------------------------
+# OpenClaw's gateway (loopback :18789) is fronted by nginx :8080 (HTTP Basic). We POST
+# /v1/chat/completions with model=openclaw/pm; nginx injects the gateway bearer token and proxies to
+# the agent runtime, which runs a real PM turn and returns the answer. Reachable only on the docker
+# network — never public.
+OPENCLAW_URL = os.environ.get("OPENCLAW_URL", "http://openclaw-s13f8pdutxps4w5z3fbl9lq5:8080")
+OPENCLAW_BASIC_USER = os.environ.get("OPENCLAW_BASIC_USER", "")
+OPENCLAW_BASIC_PASS = os.environ.get("OPENCLAW_BASIC_PASS", "")
+PM_MODEL = os.environ.get("PM_MODEL", "openclaw/pm")
+PM_TIMEOUT = float(os.environ.get("PM_TIMEOUT", "180"))
+DEFAULT_CLIENT_SLUG = os.environ.get("CLIENT_SLUG", "")
+
+
+def _client_slug(ctx: Context) -> str:
+    """Which client this Hermes speaks for — pinned by the gateway (x-client-slug), never the model."""
+    req = getattr(getattr(ctx, "request_context", None), "request", None)
+    headers = getattr(req, "headers", None)
+    vals = headers.getlist("x-client-slug") if hasattr(headers, "getlist") else []
+    if len(vals) > 1:
+        raise ValueError("ambiguous client: multiple x-client-slug headers")
+    if len(vals) == 1 and vals[0].strip():
+        return vals[0].strip()
+    return DEFAULT_CLIENT_SLUG
+
+
+@mcp.tool()
+def ask_pm(ctx: Context, question: str) -> dict[str, Any]:
+    """Ask the fleet's PM a question on the client's behalf and return PM's answer.
+
+    Use this when a client asks something you do not know (e.g. "what was our last post?") — PM has
+    the client's project history. This does NOT create a task; it is a synchronous question. If the
+    client wants WORK done, create a kanban card instead.
+    """
+    try:
+        if not (question or "").strip():
+            return {"ok": False, "error": "empty_question", "detail": "question is required"}
+        slug = _client_slug(ctx)
+        # The client identity is injected by us, from the pinned header — PM answers scoped to it.
+        sys_ctx = (f"You are answering a question relayed from the Hermes front-door for client "
+                   f"'{slug}'. Answer for THAT client only, from its project history. If you do not "
+                   f"know, say so plainly — do not invent details.") if slug else \
+                  ("You are answering a question relayed from a client's Hermes front-door. If you do "
+                   "not know, say so plainly — do not invent details.")
+        body = {"model": PM_MODEL, "messages": [
+            {"role": "system", "content": sys_ctx},
+            {"role": "user", "content": question},
+        ], "max_tokens": 800}
+        headers = {"Content-Type": "application/json"}
+        if OPENCLAW_BASIC_USER:
+            tok = base64.b64encode(f"{OPENCLAW_BASIC_USER}:{OPENCLAW_BASIC_PASS}".encode()).decode()
+            headers["Authorization"] = "Basic " + tok
+        req = urllib.request.Request(f"{OPENCLAW_URL}/v1/chat/completions",
+                                     data=json.dumps(body).encode(), headers=headers)
+        try:
+            resp = urllib.request.urlopen(req, timeout=PM_TIMEOUT)
+            payload = json.loads(resp.read().decode() or "{}")
+        except urllib.error.HTTPError as exc:
+            return {"ok": False, "error": f"pm_http_{exc.code}", "detail": exc.read().decode()[:300]}
+        ch = payload.get("choices") or []
+        answer = ch[0].get("message", {}).get("content") if ch else None
+        if not answer:
+            return {"ok": False, "error": "no_answer", "detail": "PM returned no content"}
+        return {"ok": True, "client": slug, "answer": answer}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": type(exc).__name__, "detail": str(exc)[:300]}
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http", host="0.0.0.0",
             port=int(os.environ.get("PORT", "8080")), streamable_http_path="/mcp",
