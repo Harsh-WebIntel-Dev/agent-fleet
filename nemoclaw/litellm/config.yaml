@@ -48,8 +48,8 @@ model_list:
   # claimed success nor invented a domain — and it did so in under half the tokens.
   #
   # Aliases are TIERS, not vendors, so swapping a tier is a one-line change here and no agent
-  # config moves. All three point at deepseek today; the tier split marks where escalation goes
-  # when stronger models are enabled (QA and PM review are the intended first upgrades).
+  # config moves. fast + deep = deepseek-v4-pro; standard = qwen3.5-397b-a17b (cheaper mid-tier,
+  # used by the Webster front-door). deep is reserved for judgement-critical work (QA, PM review).
 
   - model_name: fast
     litellm_params: &deepseek
@@ -67,11 +67,23 @@ model_list:
       input_cost_per_token: 0.00000132   # DO: DeepSeek V4 Pro  $1.32/M in
       output_cost_per_token: 0.00000396  # DO: DeepSeek V4 Pro  $3.96/M out
 
+  # standard -> DeepSeek-DIRECT deepseek-v4-pro (2026-08-21, temporary). Bypasses DO's gateway to test
+  # whether DO was mangling deepseek-v4-pro's reasoning stream — Webster got token-salad on DO's `deep`
+  # (same model via DO), and DeepSeek's model is reasoning:true / thinkingFormat:deepseek, so a gateway
+  # that mishandles reasoning_content would corrupt the reply. This uses DeepSeek's own OpenAI-compatible
+  # API with DEEPSEEK_API_KEY. Pricing from DeepSeek docs: $1.74/M in, $3.48/M out.
+  # PARKED for when DO recovers: standard was qwen3.5-397b-a17b (openai/qwen3.5-397b-a17b @ DO,
+  # $0.3025/$1.925) — DO-overloaded (429s) as of 2026-08-21.
   - model_name: standard
-    litellm_params: *deepseek
-    model_info: *deepseek_cost
+    litellm_params:
+      model: openai/deepseek-v4-pro
+      api_base: https://api.deepseek.com
+      api_key: os.environ/DEEPSEEK_API_KEY
+    model_info:
+      input_cost_per_token: 0.00000174   # DeepSeek direct: $1.74/M in
+      output_cost_per_token: 0.00000348  # DeepSeek direct: $3.48/M out
 
-  # Reserved for judgement-critical work (QA, PM review). Same model for now.
+  # Reserved for judgement-critical work (QA, PM review). deepseek-v4-pro.
   - model_name: deep
     litellm_params: *deepseek
     model_info: *deepseek_cost
