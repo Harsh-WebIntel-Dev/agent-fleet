@@ -1,0 +1,27 @@
+services:
+  # ClickUp chat front-door for the fleet PM: polls the workspace's DM + GROUP_DM channels and relays
+  # each new human message to the PM (OpenClaw openclaw/pm, which has ClickUp + all fleet tools),
+  # posting the PM's reply back into the ClickUp channel. Internal only (no FQDN); reaches ClickUp
+  # (public) + OpenClaw (internal). Secrets come from Coolify env, never committed.
+  clickup-bridge:
+    image: clickup-bridge:0.2.0
+    restart: unless-stopped
+    environment:
+      - CLICKUP_WORKSPACE=${CLICKUP_WORKSPACE:-307311}
+      - WEBSTER_UID=${WEBSTER_UID:-106813628}
+      # ClickUp personal token for the AI-Agent account (106813628) — polls + posts chat. SECRET.
+      - 'CLICKUP_PK_TOKEN=${CLICKUP_PK_TOKEN}'
+      - OPENCLAW_URL=${OPENCLAW_URL:-http://openclaw-s13f8pdutxps4w5z3fbl9lq5:8080}
+      # OpenClaw nginx basic-auth (reuse mcp-a2a's OPENCLAW_BASIC_USER/OPENCLAW_BASIC_PASS). SECRET.
+      - 'OPENCLAW_BASIC_USER=${OPENCLAW_BASIC_USER}'
+      - 'OPENCLAW_BASIC_PASS=${OPENCLAW_BASIC_PASS}'
+      - PM_MODEL=${PM_MODEL:-openclaw/pm}
+      - POLL_SECONDS=${POLL_SECONDS:-20}
+      - STATE_FILE=/data/.chat-state.json
+    volumes:
+      - clickup-bridge-state:/data
+    labels:
+      - traefik.enable=false
+
+volumes:
+  clickup-bridge-state:

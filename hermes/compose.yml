@@ -32,6 +32,15 @@ services:
       # env; config.yaml points the provider's base_url at the LiteLLM proxy, so every turn is
       # budgeted, logged and traced like the rest of the fleet.
       - 'OPENAI_API_KEY=${OPENAI_API_KEY}'
+      # ClickUp REST credential — a personal API token on the AI Agent account (106813628), which
+      # is the identity that makes the bot's own DM/GROUP_DM channels visible. Used ONLY by the
+      # intake monitors (scripts/monitor_tasks.py, scripts/monitor_chat.py) for polling.
+      #
+      # It cannot be the MCP's credential: ClickUp's hosted MCP is OAuth-only and its service JWT
+      # is rejected by REST with 401 OAUTH_019. And polling cannot run on the MCP at all — that is
+      # capped at 300 calls per 24h, versus REST's 100 per MINUTE. Agent ACTIONS (including
+      # clickup_send_chat_message) still go through the MCP; only DETECTION lives here.
+      - 'CLICKUP_API_TOKEN=${CLICKUP_API_TOKEN}'
       # --- A2A inbound (PM -> Hermes via LiteLLM's A2A proxy). Internal-only: bound to the docker
       # network, NO published port and traefik disabled, so it is never internet-facing. ---
       - A2A_HOST=0.0.0.0            # widens off 127.0.0.1 ONLY because a token is set below

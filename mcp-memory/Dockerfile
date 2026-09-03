@@ -2,7 +2,6 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY server.py infisical_fetch.py entrypoint.sh ./
-RUN chmod +x entrypoint.sh
+COPY server.py .
 EXPOSE 8080
-ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["python", "server.py"]

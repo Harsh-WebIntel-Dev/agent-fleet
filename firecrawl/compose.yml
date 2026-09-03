@@ -1,0 +1,184 @@
+name: firecrawl
+x-log:
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: '3'
+      compress: 'true'
+services:
+  playwright-service:
+    image: 'ghcr.io/firecrawl/playwright-service:latest'
+    environment:
+      PORT: '3000'
+      ALLOW_LOCAL_WEBHOOKS: 'false'
+      BLOCK_MEDIA: 'true'
+      MAX_CONCURRENT_PAGES: '3'
+    networks:
+      - backend
+    security_opt:
+      - 'no-new-privileges:true'
+    cap_drop:
+      - ALL
+    tmpfs:
+      - '/tmp/.cache:noexec,nosuid,size=512m'
+    cpus: 1.5
+    mem_limit: 2G
+    memswap_limit: 3G
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+        compress: 'true'
+  api:
+    image: 'ghcr.io/firecrawl/firecrawl:latest'
+    user: '1000:1000'
+    command: 'node dist/src/harness.js --start-docker'
+    environment:
+      HOME: /tmp
+      ENV: local
+      HOST: 0.0.0.0
+      PORT: '3002'
+      INTERNAL_PORT: '3002'
+      USE_DB_AUTHENTICATION: 'false'
+      REDIS_URL: 'redis://redis:6379'
+      REDIS_RATE_LIMIT_URL: 'redis://redis:6379'
+      PLAYWRIGHT_MICROSERVICE_URL: 'http://playwright-service:3000/scrape'
+      POSTGRES_HOST: nuq-postgres
+      POSTGRES_PORT: '5432'
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: '${SERVICE_PASSWORD_FIRECRAWLPG}'
+      POSTGRES_DB: postgres
+      NUQ_RABBITMQ_URL: 'amqp://firecrawl:${SERVICE_PASSWORD_FIRECRAWLMQ}@rabbitmq:5672'
+      NUM_WORKERS_PER_QUEUE: '1'
+      CRAWL_CONCURRENT_REQUESTS: '3'
+      MAX_CONCURRENT_JOBS: '2'
+      BROWSER_POOL_SIZE: '2'
+      HARNESS_STARTUP_TIMEOUT_MS: '180000'
+      SEARXNG_ENDPOINT: 'http://searxng:8080'
+    depends_on:
+      redis:
+        condition: service_started
+      playwright-service:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+      nuq-postgres:
+        condition: service_started
+    networks:
+      - backend
+    security_opt:
+      - 'no-new-privileges:true'
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    labels:
+      - traefik.enable=false
+    cpus: 2.0
+    mem_limit: 4G
+    memswap_limit: 8G
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+        compress: 'true'
+  redis:
+    image: 'redis:alpine'
+    user: '999:999'
+    command: 'redis-server --bind 0.0.0.0 --save "" --appendonly no'
+    networks:
+      - backend
+    security_opt:
+      - 'no-new-privileges:true'
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+        compress: 'true'
+  rabbitmq:
+    image: 'rabbitmq:3-management'
+    environment:
+      RABBITMQ_DEFAULT_USER: firecrawl
+      RABBITMQ_DEFAULT_PASS: '${SERVICE_PASSWORD_FIRECRAWLMQ}'
+    networks:
+      - backend
+    security_opt:
+      - 'no-new-privileges:true'
+    healthcheck:
+      test:
+        - CMD
+        - rabbitmq-diagnostics
+        - '-q'
+        - check_running
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 25s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+        compress: 'true'
+  nuq-postgres:
+    image: 'ghcr.io/firecrawl/nuq-postgres:latest'
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: '${SERVICE_PASSWORD_FIRECRAWLPG}'
+      POSTGRES_DB: postgres
+    networks:
+      - backend
+    security_opt:
+      - 'no-new-privileges:true'
+    volumes:
+      - 'firecrawl-pg:/var/lib/postgresql/data'
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+        compress: 'true'
+  searxng:
+    image: 'searxng/searxng:latest'
+    volumes:
+      - '/home/harsh/searxng-cfg/settings.yml:/etc/searxng/settings.yml:ro'
+    networks:
+      - backend
+    security_opt:
+      - 'no-new-privileges:true'
+    cpus: 1.0
+    mem_limit: 512M
+    memswap_limit: 1G
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - '-qO-'
+        - 'http://127.0.0.1:8080/healthz'
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+        compress: 'true'
+networks:
+  backend:
+    driver: bridge
+volumes:
+  firecrawl-pg: null

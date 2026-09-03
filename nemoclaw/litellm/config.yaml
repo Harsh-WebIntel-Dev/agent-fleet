@@ -257,6 +257,12 @@ general_settings:
 # RULE (user): official / first-party MCP servers only. Where no official server exists, wrap the
 # vendor's own REST API ourselves rather than adopting a community server.
 mcp_servers:
+  higgsfield:
+    url: http://mcp-higgsfield-gtjymgp2unprqsjd82i0o328:8080/mcp
+    transport: http
+    description: 'Brand image rendering via Higgsfield (async: create_image_job then poll get_image_job)'
+    access_groups:
+      - fleet_tools
   # Client assets in DigitalOcean Spaces. DO's own MCP server covers key MANAGEMENT only
   # (spaces-key-create/delete/get/list/update) with no object operations, so per the
   # official-servers-first rule this is our own thin wrapper over DO's S3-compatible API.

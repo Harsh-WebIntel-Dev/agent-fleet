@@ -1,30 +1,24 @@
 services:
-  # MCP server exposing DigitalOcean Spaces object operations to fleet agents.
-  #
-  # Internal only — reached by LiteLLM over the shared `coolify` network and surfaced to agents
-  # through LiteLLM's MCP gateway. It holds a Spaces access key, so it must never get a public
-  # route: no FQDN, no published port, traefik disabled. Note *.widev.com.au is a WILDCARD onto
-  # this box's public IP, so any Coolify-generated FQDN would be instantly internet-facing.
   mcp-spaces:
-    image: mcp-spaces:0.4.1
+    image: 'mcp-spaces:0.5.1'
     restart: unless-stopped
     environment:
       - PORT=8080
-      - DO_SPACES_BUCKET=${DO_SPACES_BUCKET:-wi-ai}
-      - DO_SPACES_REGION=${DO_SPACES_REGION:-syd1}
-      - DO_SPACES_ENDPOINT=${DO_SPACES_ENDPOINT:-https://syd1.digitaloceanspaces.com}
-      # Scoped to the wi-ai bucket only. Object operations are further confined to
-      # clients/<slug>/ inside server.py — isolation is enforced in code, not by the key alone.
-      - DO_SPACES_ACCESS_KEY=${DO_SPACES_ACCESS_KEY}
-      - DO_SPACES_SECRET_KEY=${DO_SPACES_SECRET_KEY}
-      - SPACES_ROOT_PREFIX=${SPACES_ROOT_PREFIX:-clients}
+      - 'DO_SPACES_BUCKET=${DO_SPACES_BUCKET:-wi-ai}'
+      - 'DO_SPACES_REGION=${DO_SPACES_REGION:-syd1}'
+      - 'DO_SPACES_ENDPOINT=${DO_SPACES_ENDPOINT:-https://syd1.digitaloceanspaces.com}'
+      - 'DO_SPACES_ACCESS_KEY=${DO_SPACES_ACCESS_KEY}'
+      - 'DO_SPACES_SECRET_KEY=${DO_SPACES_SECRET_KEY}'
+      - 'SPACES_ROOT_PREFIX=${SPACES_ROOT_PREFIX:-clients}'
+      - 'SPACES_CLIENT_SLUGS=${SPACES_CLIENT_SLUGS}'
     labels:
       - traefik.enable=false
     healthcheck:
-      # TCP check, not HTTP: /mcp correctly answers 406 to a request without SSE Accept headers,
-      # which would make a working server look unhealthy.
-      test: ["CMD", "python", "-c",
-             "import socket,sys; s=socket.socket(); s.settimeout(4); sys.exit(s.connect_ex(('127.0.0.1',8080)))"]
+      test:
+        - CMD
+        - python
+        - '-c'
+        - "import socket,sys; s=socket.socket(); s.settimeout(4); sys.exit(s.connect_ex(('127.0.0.1',8080)))"
       interval: 20s
       timeout: 8s
       retries: 5

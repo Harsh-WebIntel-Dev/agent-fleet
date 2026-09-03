@@ -1,0 +1,23 @@
+services:
+  # Thin MCP over the OFFICIAL WordPress REST API: lets the fleet `publisher` agent create drafts, set
+  # Yoast SEO meta, upload media, hand a review link to the client, and publish on approval -- returning
+  # real, verifiable ids/URLs. Internal only (no FQDN, traefik off). Auth = a WordPress application
+  # password for the content-bot user, supplied from a Coolify secret (never model-chosen, never printed).
+  mcp-wordpress:
+    image: mcp-wordpress:0.1.0
+    restart: unless-stopped
+    environment:
+      - PORT=8080
+      - WP_SITE_URL=${WP_SITE_URL:-https://webintelligenz.com}
+      - WP_USERNAME=${WP_USERNAME:-content-bot}
+      # content-bot application password (Basic auth). SECRET -- set in Coolify, never commit.
+      - 'WP_APP_PASSWORD=${WP_APP_PASSWORD}'
+    labels:
+      - traefik.enable=false
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import socket,sys; s=socket.socket(); s.settimeout(4); sys.exit(s.connect_ex(('127.0.0.1',8080)))"]
+      interval: 20s
+      timeout: 8s
+      retries: 5
+      start_period: 15s

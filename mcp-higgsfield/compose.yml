@@ -1,0 +1,29 @@
+services:
+  # Thin MCP over the official Higgsfield CLI: lets the fleet `image` agent render brand-quality images.
+  # Internal only (no FQDN, traefik off). Auth = OAuth token bundle from a one-time browser `higgsfield
+  # auth login`, seeded from a Coolify secret onto a PERSISTED volume so the CLI can refresh headlessly.
+  mcp-higgsfield:
+    image: mcp-higgsfield:0.1.0
+    restart: unless-stopped
+    environment:
+      - PORT=8080
+      # The whole credentials.json from `higgsfield auth login` (access_token + refresh_token). SECRET.
+      - 'HIGGSFIELD_CREDENTIALS_JSON=${HIGGSFIELD_CREDENTIALS_JSON}'
+      # Billing workspace to render under (non-secret). Defaults to the agency workspace.
+      - HIGGSFIELD_WORKSPACE_ID=${HIGGSFIELD_WORKSPACE_ID:-e6ebe7f7-23a0-4a95-a6d5-d72beb1d4a94}
+      - HIGGSFIELD_DEFAULT_MODEL=${HIGGSFIELD_DEFAULT_MODEL:-nano_banana_pro}
+    volumes:
+      # Persist the OAuth token so refreshed access tokens survive restarts (seed clobber-guarded above).
+      - higgsfield-config:/root/.config/higgsfield
+    labels:
+      - traefik.enable=false
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import socket,sys; s=socket.socket(); s.settimeout(4); sys.exit(s.connect_ex(('127.0.0.1',8080)))"]
+      interval: 20s
+      timeout: 8s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  higgsfield-config:

@@ -1,0 +1,56 @@
+#!/bin/sh
+# render-card — render a local HTML file to a fixed-size PNG using headless Chromium.
+# The fleet's HTML→PNG path for social/blog template cards (the producer's real render step;
+# AI-gen via Higgsfield is separate). Runs headless with --no-sandbox (required: the container
+# sets no-new-privileges, so Chromium's own SUID sandbox can't start).
+#
+# Usage:  render-card <input.html> <output.png> [width] [height] [scale]
+#   defaults: 1200x630 (FB/blog link card), scale 2 for crisp text (downscale in-viewer is fine).
+#   IG 4:5  -> render-card card.html out.png 1080 1350
+#   GBP 4:3 -> render-card card.html out.png 1200 900
+#
+# The HTML's <body> should be exactly WxH (no margin) so the capture is pixel-exact. Local @font-face
+# files (from the brand kit) and remote Google Fonts both load (the sandbox has internet egress).
+set -eu
+IN=${1:?usage: render-card <input.html> <output.png> [width] [height] [scale]}
+OUT=${2:?output.png required}
+W=${3:-1200}
+H=${4:-630}
+SCALE=${5:-2}
+
+case "$IN" in
+  http://*|https://*|file://*) URL="$IN" ;;
+  *) URL="file://$(readlink -f "$IN")" ;;
+esac
+
+# --headless=old captures exactly the --window-size viewport (new headless captures full page).
+chromium \
+  --headless=old \
+  --no-sandbox \
+  --disable-gpu \
+  --disable-dev-shm-usage \
+  --hide-scrollbars \
+  --force-device-scale-factor="$SCALE" \
+  --default-background-color=00000000 \
+  --window-size="${W},${H}" \
+  --virtual-time-budget=8000 \
+  --screenshot="$OUT" \
+  "$URL" >/dev/null 2>&1
+
+if [ ! -s "$OUT" ]; then
+  echo "render-card: FAILED — no output written for $URL" >&2
+  exit 1
+fi
+# report real dimensions so the caller can verify (never trust the request)
+python3 - "$OUT" <<'PY'
+import struct, sys
+p = sys.argv[1]
+with open(p, "rb") as f:
+    head = f.read(24)
+if head[:8] == b"\x89PNG\r\n\x1a\n" and head[12:16] == b"IHDR":
+    w, h = struct.unpack(">II", head[16:24])
+    import os
+    print(f"render-card: OK {p} {w}x{h} ({os.path.getsize(p)} bytes)")
+else:
+    print(f"render-card: WROTE {p} but it is not a valid PNG", file=sys.stderr); sys.exit(1)
+PY

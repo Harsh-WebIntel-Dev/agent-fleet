@@ -17,3 +17,6 @@ secrets/
 # Local scratch
 *.log
 .DS_Store
+.remember/
+*.bak
+*.bak-*

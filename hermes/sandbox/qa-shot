@@ -1,0 +1,63 @@
+#!/bin/sh
+# qa-shot — screenshot a live URL (or local HTML card) for VISUAL QA, as a small JPEG that fits ClickUp's
+# base64 attach limit (<200KB). Prints the base64 so the reviewer flow can attach it straight to the task
+# via clickup_attach_task_file(file_data=<base64>, file_name=...). Captures the top viewport (the hero /
+# title / first section — what QA cares about) at a readable size; pass a taller height for more.
+#
+# Why base64 and not a URL: the fleet's R2 token can't mint working presigned URLs (R2 rejects them), and
+# the sandbox holds no ClickUp token (isolation), so the bytes must ride back through the agent. Keeping
+# the JPEG small keeps that cheap.
+#
+# Usage:  qa-shot <url|file.html> [width] [height]
+#   width 1280 = desktop (default), 390 = mobile.  height 1600 default (top of page).
+# Output: a "qa-shot: OK ..." line, then a line "FILE=<name.jpg>", then the raw base64 on the final line.
+set -eu
+SRC=${1:?usage: qa-shot <url|file.html> [width] [height]}
+W=${2:-1280}
+H=${3:-1600}
+
+case "$SRC" in
+  http://*|https://*|file://*) URL="$SRC" ;;
+  *) URL="file://$(readlink -f "$SRC")" ;;
+esac
+
+PNG=$(mktemp --suffix=.png)
+JPG=$(mktemp --suffix=.jpg)
+# --headless=old captures exactly the WxH viewport (readable); new-headless would grab the whole long page.
+chromium \
+  --headless=old \
+  --no-sandbox \
+  --disable-gpu \
+  --disable-dev-shm-usage \
+  --hide-scrollbars \
+  --force-device-scale-factor=1 \
+  --window-size="${W},${H}" \
+  --virtual-time-budget=12000 \
+  --screenshot="$PNG" \
+  "$URL" >/dev/null 2>&1
+
+[ -s "$PNG" ] || { echo "qa-shot: FAILED — no screenshot produced for $URL" >&2; rm -f "$PNG" "$JPG"; exit 1; }
+
+# PNG -> JPEG, downscaling / dropping quality until it fits comfortably under ClickUp's ~200KB base64 cap.
+python3 - "$PNG" "$JPG" <<'PY'
+import sys, os
+from PIL import Image
+src, out = sys.argv[1], sys.argv[2]
+im = Image.open(src).convert("RGB")
+q, max_w = 85, im.width
+while True:
+    w = min(im.width, max_w)
+    scaled = im.resize((w, round(im.height * w / im.width))) if w < im.width else im
+    scaled.save(out, "JPEG", quality=q, optimize=True)
+    if os.path.getsize(out) <= 185000 or (q <= 45 and max_w <= 700):
+        break
+    if q > 55: q -= 10
+    else: max_w = int(max_w * 0.85)
+im2 = Image.open(out)
+print(f"qa-shot: OK {im2.width}x{im2.height} JPEG ({os.path.getsize(out)} bytes, q{q})")
+PY
+
+echo "FILE=$(basename "$JPG")"
+base64 -w0 "$JPG" 2>/dev/null || base64 "$JPG" | tr -d '\n'
+echo
+rm -f "$PNG" "$JPG"

@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import urllib.request
 import urllib.error
 from typing import Any
@@ -71,11 +72,19 @@ def _target_agent_id(ctx: Context) -> str:
 
 
 @mcp.tool()
-def notify_client_hermes(ctx: Context, message: str, expect_reply: bool = True) -> dict[str, Any]:
+def notify_client_hermes(ctx: Context, message: str, expect_reply: bool = True,
+                         context_id: str = "") -> dict[str, Any]:
     """Send a message to the acting client's Hermes and (by default) return its reply.
 
     Use for: reporting a task is complete, or asking the client for more information. The client's
     Hermes runs the message in its LIVE session (same agent talking to the client, full memory).
+
+    THREADING: every call threads into ONE stable conversation per client, so your updates land in the
+    same session instead of scattering into a new one each time (Hermes keys A2A conversations by
+    contextId). You do NOT need to manage this — the context defaults to a per-client value derived from
+    the pinned Hermes identity. Only pass `context_id` if you deliberately want a separate, finer thread
+    for one specific piece of work (e.g. a distinct campaign) that should not mix with the main liaison
+    conversation.
     """
     try:
         if not A2A_KEY:
@@ -84,13 +93,23 @@ def notify_client_hermes(ctx: Context, message: str, expect_reply: bool = True) 
             return {"ok": False, "error": "empty_message", "detail": "message is required"}
         agent_id = _target_agent_id(ctx)
 
+        # Thread every fleet->client update into ONE stable Hermes conversation per client, so replies
+        # do not scatter into a fresh session on each call. Hermes keys A2A conversations by contextId;
+        # omitting it (the old behaviour) minted a new context — and a new session — every time. The
+        # default is deterministic and code-enforced (NEVER model-supplied): derived from the pinned
+        # per-client Hermes agent_id. A caller MAY override with a finer, task-scoped context_id.
+        raw_ctx = (context_id or "").strip() or f"ctx-fleet-{agent_id}"
+        ctxid = re.sub(r"[^A-Za-z0-9._-]", "-", raw_ctx)[:120]
+        # Unique per distinct message so Hermes never dedupes a repeated notification.
+        mid = "pm-" + hashlib.sha256(message.encode()).hexdigest()[:16]
         body = {
             "jsonrpc": "2.0",
             "id": "notify",  # MUST be a string — LiteLLM's response model rejects an int id
             "method": "message/send",
             "params": {"message": {
                 "role": "user",
-                "messageId": "pm-notify",
+                "messageId": mid,
+                "contextId": ctxid,
                 "parts": [{"kind": "text", "text": message}],
             }},
         }

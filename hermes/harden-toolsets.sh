@@ -32,6 +32,24 @@ SAFE=["clarify","delegation","image_gen","kanban","memory",
 pt=cfg.setdefault("platform_toolsets",{})
 for plat in PLATFORMS: pt[plat]=list(SAFE)
 
+# cronjob lets the PM create/manage scheduled feeds (e.g. a SEMrush RSS -> SEO-memory watcher).
+# Enabled on cli + cron + api_server (2026-08-26). api_server is the wi-agent webui: it is PUBLIC
+# (password-only) TODAY, and the user has accepted that temporary exposure with the plan to lock the
+# webui to TAILSCALE-ONLY before go-live — at which point only trusted users reach it and cron-on-webui
+# is fully safe. Blast radius even now is bounded: code_execution/terminal stay off everywhere, so a
+# cronjob can only schedule agent turns (budget-capped), not run shell. If you ever revert to a public
+# webui WITHOUT Tailscale and want to re-tighten, drop "api_server" from this list.
+for plat in ("cli", "cron", "api_server"):
+    if plat in pt and "cronjob" not in pt[plat]:
+        pt[plat].append("cronjob")
+
+# ALSO set the top-level `toolsets` key. platform_toolsets drives the per-platform TOOL POLICY, but
+# the kanban ORCHESTRATOR gate (tools/kanban_tools.py::_check_kanban_mode) reads the top-level
+# `toolsets:` key to decide whether a non-worker turn (the PM via cli/cron) gets kanban_create/list.
+# Without this, the PM has ZERO kanban tools and cannot build a dependency chain — the delegation
+# path silently breaks (found 2026-08-25). Mirrors SAFE so it includes `kanban`.
+cfg["toolsets"]=list(SAFE)
+
 # redact_secrets masks key/token-shaped strings in tool output, logs and replies BEFORE the model or
 # user sees them — the credential-theft control. On by default; pinned so it survives config edits.
 # tirith is pre-exec scanning: inert while code_execution is off, correct if it is ever re-enabled.

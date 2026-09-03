@@ -11,12 +11,24 @@ The alternative considered and rejected was a FUSE mount of the bucket into the 
 That needed CAP_SYS_ADMIN on the one service that executes agent code and drives a browser — a
 real containment downgrade to buy convenience. A tool needs no capability at all.
 
-TENANT ISOLATION IS ENFORCED HERE, IN CODE
-Every operation is confined to `clients/<slug>/` and the slug is validated against a strict
-pattern. Traversal (`..`), absolute paths and slug-shaped lookalikes are rejected before any S3
-call. This matters because the caller is a language model: prompt-level rules are not a control,
-as this project has demonstrated repeatedly. An agent that asks for another client's file gets an
-error, not the file.
+TENANT ISOLATION: THREE LAYERS, AND BE PRECISE ABOUT WHICH IS WHICH
+1. PATH CONTAINMENT (always on). Every operation is confined to `clients/<slug>/`; the slug is
+   validated against a strict pattern and traversal (`..`), absolute paths and lookalikes are
+   rejected before any S3 call.
+2. WHICH SLUGS EXIST AT ALL (the allowlist, on when `SPACES_CLIENT_SLUGS` is set). Containment
+   alone does NOT stop a caller naming a different, well-formed slug — for a long time this file
+   claimed otherwise, and it was wrong. On a SHARED fleet (one key legitimately serves every
+   client, so the slug must travel as an argument) the guardrail is an allowlist of real client
+   slugs: anything outside it is refused, which stops a typo from silently creating a phantom
+   tenant (`web-intelligenz` vs `webintelligenz`) and confines the fleet to actual clients.
+   It does NOT isolate one real client from another — that is inherent to a shared key; for that
+   you need layer 3.
+3. WHICH SLUG YOU MAY NAME (only when pinned). A client-FACING deployment (one instance per
+   client) is PINNED by the gateway-set `x-client-slug` header (LiteLLM `static_headers` on a
+   per-client mcp_servers entry); when that header is present it wins and a conflicting `client`
+   argument is refused outright. This is the only layer that gives true cross-tenant isolation,
+   and it is unused today because the fleet is shared, not per-client. Never expose an
+   argument-only deployment to a client.
 
 Registered in LiteLLM's MCP gateway, so it appears alongside Postiz in the MCP page and picks up
 per-tool call counts and spend in tool-policies.
@@ -37,7 +49,7 @@ import httpx
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import MCPServer, Context
 
 BUCKET = os.environ.get("DO_SPACES_BUCKET", "wi-ai")
 REGION = os.environ.get("DO_SPACES_REGION", "syd1")
@@ -47,6 +59,16 @@ ROOT_PREFIX = os.environ.get("SPACES_ROOT_PREFIX", "clients")
 # A client slug is a directory name we control at onboarding. Anything else is refused outright
 # rather than sanitised — silently "fixing" a bad slug is how you end up in the wrong tenant.
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
+
+# The real client slugs this deployment may act for. When set, a slug outside this list is refused
+# outright — this is layer 2 above, and the honest guardrail for a shared fleet: it stops a typo
+# from creating a phantom tenant and confines the fleet to actual onboarded clients. Unset means no
+# allowlist (any well-formed slug is accepted), preserving the original behaviour for local/dev use.
+ALLOWED_CLIENTS = frozenset(
+    s.strip().lower()
+    for s in os.environ.get("SPACES_CLIENT_SLUGS", "").split(",")
+    if s.strip()
+)
 
 # Read/write caps. Object storage will happily accept a 5GB PUT from a confused agent.
 MAX_READ_BYTES = 8 * 1024 * 1024
@@ -269,16 +291,67 @@ def _err(exc: Exception) -> dict[str, Any]:
     return {"ok": False, "error": type(exc).__name__, "detail": str(exc)[:300]}
 
 
+
+def _resolve_client(ctx: Context, client: str = "") -> str:
+    """Which client this call acts for.
+
+    Precedence is deliberate and is the whole point of this function:
+
+      1. The gateway-set ``x-client-slug`` header WINS. LiteLLM attaches it via ``static_headers``
+         on a per-client ``mcp_servers`` entry, so a client-facing deployment is PINNED to its own
+         slug and the model cannot reach another tenant's folder no matter what it passes.
+      2. Only if no header is present does the ``client`` argument apply. That path exists for the
+         shared agency fleet, where one key legitimately serves every client and the slug therefore
+         has to travel per-request.
+
+    A header plus a CONFLICTING argument is refused rather than silently resolved — that shape means
+    either a misconfiguration or a model trying to escape its pin, and neither should be guessed at.
+    Duplicate headers are refused for the same reason (header-injection defence).
+    """
+    req = getattr(getattr(ctx, "request_context", None), "request", None)
+    headers = getattr(req, "headers", None)
+    vals = headers.getlist("x-client-slug") if hasattr(headers, "getlist") else []
+    if len(vals) > 1:
+        raise ValueError("ambiguous client: multiple x-client-slug headers")
+
+    pinned = vals[0].strip().lower() if (len(vals) == 1 and vals[0].strip()) else ""
+    asked = (client or "").strip().lower()
+
+    if pinned:
+        if asked and asked != pinned:
+            raise ValueError(
+                f"client mismatch: this deployment is pinned to {pinned!r} but the call asked for "
+                f"{asked!r}. Refusing rather than guessing."
+            )
+        return _check_allowed(pinned)
+
+    if not asked:
+        raise ValueError(
+            "no client specified: pass `client`, or deploy behind an x-client-slug header"
+        )
+    return _check_allowed(asked)
+
+
+def _check_allowed(slug: str) -> str:
+    """Refuse any slug outside the configured allowlist (layer 2). No-op when the allowlist is unset."""
+    if ALLOWED_CLIENTS and slug not in ALLOWED_CLIENTS:
+        raise ValueError(
+            f"unknown client slug {slug!r}: not in the configured allowlist "
+            f"({', '.join(sorted(ALLOWED_CLIENTS))}). Refusing rather than creating a stray tenant."
+        )
+    return slug
+
+
 @mcp.tool()
-def spaces_list(client: str, path: str = "", limit: int = 100) -> dict[str, Any]:
+def spaces_list(ctx: Context, path: str = "", limit: int = 100, client: str = "") -> dict[str, Any]:
     """List client asset files. `client` is the client slug, `path` an optional sub-folder.
 
     Returns object keys relative to the client's folder, with sizes and modified times.
     """
     try:
-        slug = (client or "").strip().lower()
+        slug = _resolve_client(ctx, client)
         if not SLUG_RE.match(slug):
-            raise ValueError(f"invalid client slug {client!r}")
+            raise ValueError(f"invalid client slug {slug!r}")
         rel = (path or "").strip().lstrip("/")
         if ".." in rel.split("/"):
             raise ValueError("path traversal ('..') is not allowed")
@@ -305,10 +378,10 @@ def spaces_list(client: str, path: str = "", limit: int = 100) -> dict[str, Any]
 
 
 @mcp.tool()
-def spaces_read(client: str, path: str) -> dict[str, Any]:
+def spaces_read(ctx: Context, path: str, client: str = "") -> dict[str, Any]:
     """Read a client asset. Text is returned inline; binary is returned base64-encoded."""
     try:
-        key = _key(client, path)
+        key = _key(_resolve_client(ctx, client), path)
         s3 = _s3()
         head = s3.head_object(Bucket=BUCKET, Key=key)
         size = head["ContentLength"]
@@ -329,11 +402,11 @@ def spaces_read(client: str, path: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def spaces_write(client: str, path: str, content: str, encoding: str = "utf-8",
+def spaces_write(ctx: Context, path: str, content: str, encoding: str = "utf-8", client: str = "",
                  content_type: str = "") -> dict[str, Any]:
     """Write a client asset. Set encoding='base64' for binary content."""
     try:
-        key = _key(client, path)
+        key = _key(_resolve_client(ctx, client), path)
         if encoding == "base64":
             data = base64.b64decode(content)
         elif encoding == "utf-8":
@@ -356,7 +429,7 @@ def spaces_write(client: str, path: str, content: str, encoding: str = "utf-8",
 
 
 @mcp.tool()
-def spaces_ingest_url(client: str, path: str, source_url: str,
+def spaces_ingest_url(ctx: Context, path: str, source_url: str, client: str = "",
                       content_type: str = "") -> dict[str, Any]:
     """Fetch a remote asset and store it in the client's folder. Use this for generated media.
 
@@ -373,7 +446,7 @@ def spaces_ingest_url(client: str, path: str, source_url: str,
     read from the file header — evidence, not a claim.
     """
     try:
-        key = _key(client, path)
+        key = _key(_resolve_client(ctx, client), path)
         ok, why = _is_public_url(source_url)
         if not ok:
             return {"ok": False, "error": "bad_source_url", "detail": why, "url": source_url}
@@ -410,14 +483,14 @@ def spaces_ingest_url(client: str, path: str, source_url: str,
 
 
 @mcp.tool()
-def spaces_presign(client: str, path: str, expires_seconds: int = 3600) -> dict[str, Any]:
+def spaces_presign(ctx: Context, path: str, expires_seconds: int = 3600, client: str = "") -> dict[str, Any]:
     """Create a temporary shareable URL for a client asset (default 1 hour, max 7 days).
 
     Objects are stored private. This is how an asset is handed to something outside the fleet —
     a human, or a platform that needs to fetch the file — without making the bucket public.
     """
     try:
-        key = _key(client, path)
+        key = _key(_resolve_client(ctx, client), path)
         ttl = max(60, min(int(expires_seconds), 7 * 24 * 3600))
         s3 = _s3()
         s3.head_object(Bucket=BUCKET, Key=key)  # fail loudly rather than sign a dead URL
@@ -430,7 +503,7 @@ def spaces_presign(client: str, path: str, expires_seconds: int = 3600) -> dict[
 
 
 @mcp.tool()
-def spaces_delete(client: str, path: str) -> dict[str, Any]:
+def spaces_delete(ctx: Context, path: str, client: str = "") -> dict[str, Any]:
     """Retire a client asset. SOFT delete — the object is moved, never destroyed.
 
     Deliberately non-destructive. OpenClaw's `approvals` system gates shell exec only, NOT MCP tool
@@ -442,11 +515,14 @@ def spaces_delete(client: str, path: str) -> dict[str, Any]:
     client's folder in one call.
     """
     try:
-        key = _key(client, path)
+        # Resolve ONCE and reuse: deriving the trash slug from the raw `client` arg instead of the
+        # resolved slug misfiles trash outside the tenant folder (clients//.trash/...) whenever the
+        # slug came from an x-client-slug header rather than the argument.
+        slug = _resolve_client(ctx, client)
+        key = _key(slug, path)
         s3 = _s3()
         head = s3.head_object(Bucket=BUCKET, Key=key)  # 404 rather than silently "succeeding"
 
-        slug = client.strip().lower()
         stamp = head["LastModified"].strftime("%Y%m%dT%H%M%S")
         trash_key = f"{ROOT_PREFIX}/{slug}/.trash/{stamp}/{path.lstrip('/')}"
 
