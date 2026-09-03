@@ -224,18 +224,17 @@ actually happened.
     uses this key, so WI-only scoping (lnkbio, mailchimp) is **SOUL policy**, not a hard boundary.
   - **3 client keys** (biogone / pride-advice / radiance-wealth) grant by explicit **server-ID list**
     → must be updated per new server; the TEAM must allow a server before a key can.
-- **Models** (`model_aliases` + LiteLLM routing): Webster converses on **`flash`** (deepseek-v4-flash,
-  ~16× cheaper) — high-turn/low-depth; specialist/deep work uses higher tiers (`standard` → DeepSeek
-  V4 Pro). DeepSeek-direct via the deepseek key; other models via DigitalOcean GenAI
+- **Models** (`model_aliases` + LiteLLM routing): Webster's default profile runs on **`standard`**
+  (`model.default: standard` → DeepSeek V4 Pro) — **confirmed intended by Harsh 2026-09-04**;
+  specialist/deep work uses the `standard`/`deep` tiers. DeepSeek-direct via the deepseek key; other models via DigitalOcean GenAI
   (`inference.do-ai.run`, `DO_INFERENCE_KEY`) — premium tiers can be 403 tier-gated. **Vision** for all
   agents is a LiteLLM `vision` alias (→ DO llama-4-maverick), wired via `auxiliary.vision` in
   `config.yaml`. **Embeddings** = `embed` alias (bge-m3, 1024-dim) used by mcp-memory. Tiers seen:
   `flash`, `fast`, `standard`, `deep`, `vision`, `embed`.
-  - **⚠️ Discrepancy to confirm (2026-09-04):** live `config.yaml` runs the default profile (Webster)
-    on **`model.default: standard`**, not `flash` as the reasoning above describes. Intent
-    **unconfirmed** — this may be a deliberate quality change or a drift. Verify which model
-    `webster-pm` actually bills via the litellm spend logs before acting on either the flash rationale
-    or this note.
+  - **On `flash` (superseded default):** an earlier design ran Webster on **`flash`**
+    (deepseek-v4-flash, ~16× cheaper) because PM work is high-turn/low-depth. That no longer describes
+    the live default — the deployed default is **`standard`**, confirmed intended by Harsh 2026-09-04.
+    `flash` remains an available alias.
 - **Model routing & per-client billing (`providers:` in the Hermes config).** Hermes reaches models
   ONLY through litellm (`…:4000/v1`, `discover_models:false`). The default provider `litellm` uses the
   WI agency key (`OPENAI_API_KEY`); three per-client providers `litellm-<slug>` use that client's

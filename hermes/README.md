@@ -23,20 +23,20 @@ than by a container per client. See `CLAUDE.md` §4 and §6.
 |---|---|
 | agent image | `nousresearch/hermes-agent:v2026.8.18` = **v0.20.4** (tag, not a sha digest — a digest tells a reviewer nothing about age) |
 | webui image | `ghcr.io/nesquena/hermes-webui@sha256:d483b07…` = **0.52.247**, pinned **by digest** (see below) |
-| model | default profile runs on **`standard`** live — the older `flash` rationale below is under review; see the discrepancy note in `CLAUDE.md` §6 |
+| model | default profile runs on **`standard`** (`model.default: standard`) — **confirmed intended (Harsh, 2026-09-04)**; the earlier `flash` note below is superseded, see `CLAUDE.md` §6 |
 | keys | per-client LiteLLM virtual keys + budgets (WI agency + `biogone` / `pride-advice` / `radiance-wealth`) — see `CLAUDE.md` §6 |
 | config | `~/.hermes/config.yaml` — see `config.yaml.template` |
 
 ## A note on the model tier
 
-Hermes is high-turn, low-depth: it converses and hands off, so the front door was speced for a cheap
-tier — deepseek-v4-flash is roughly **16× cheaper in and out** than v4-pro ($0.08/$0.25 vs
-$1.32/$3.96), and the fleet keeps the expensive tiers for work that is actually produced.
+The deployed default is **`standard`** (`model.default: standard`) — **confirmed intended by Harsh,
+2026-09-04.**
 
-> **⚠️ Discrepancy to confirm (2026-09-04):** live `config.yaml` has `model.default: standard`, not
-> `flash`. Intent is **unconfirmed** — this may be a deliberate quality change or a drift. Verify via
-> litellm spend logs which model `webster-pm` actually bills before relying on either the flash
-> reasoning above or this note. See `CLAUDE.md` §6.
+An earlier design ran the front door on **`flash`** (deepseek-v4-flash), on the grounds that Hermes
+is high-turn, low-depth: it converses and hands off, and flash is roughly **16× cheaper in and out**
+than v4-pro ($0.08/$0.25 vs $1.32/$3.96), with the expensive tiers kept for work that is actually
+produced. That rationale no longer describes the live default; `flash` remains an available alias.
+See `CLAUDE.md` §6.
 
 `discover_models: false` is deliberate — LiteLLM exposes every alias the key can reach, including
 embeddings and the tier-blocked partner models. Hermes should only offer the conversational ones.
