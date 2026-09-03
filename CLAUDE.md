@@ -262,7 +262,31 @@ redis + a **tailscale-proxy** sidecar). **Tailnet-only — not internet-facing.*
 
 ---
 
-## 7. MCP sidecars
+## 7. MCP tools & sidecars
+
+All agents reach tools through the litellm **aggregated `/mcp/`** endpoint (Hermes calls it
+`pm_comms`), scoped by **access group**: `fleet_tools` (all fleet), `fleet_internal` (ClickUp only),
+`wi_tools` (Web-Intelligenz-only). The **10 registered MCP servers** (`mcp_servers:` in
+`litellm-cfg/config.yaml`):
+
+| MCP | Where | Group | Key tools | Notes |
+|---|---|---|---|---|
+| **clickup** | external `mcp.clickup.com` | `fleet_internal` | full ClickUp: tasks, lists, comments, chat, docs, time | **no** tool restriction → the whole toolset (that's why Webster can list tasks + DM) |
+| **semrush** | external `mcp.semrush.com/v2` | `fleet_tools` | keyword / backlink / organic / competitor / site-audit research | header auth (`SEMRUSH_API_KEY_HEADER`) |
+| **postiz** | self-hosted `postiz.widev.com.au` | `fleet_tools` | `integrationSchedulePostTool`, `integrationList`, `groupList`, `integrationSchema`, `triggerTool`, `generateImage/VideoTool`, `uploadFromUrlTool` | social + Google Business Profile; 10-tool allow-list (excludes `ask_postiz`) |
+| **postiz_extras** | sidecar `mcp-postiz-extras` | `fleet_tools` | `postiz_list`, `postiz_delete`, `postiz_set_status`, `postiz_edit` | fills gaps the built-in Postiz MCP lacks; delete-500 = success; 15-min past-slot guard on edit |
+| **lnkbio** | sidecar `mcp-lnkbio` | **`wi_tools`** | `lnkbio_list`, `lnkbio_set_link` | **WI-only**; rolling top-5 (adds a link, drops the oldest) |
+| **mailchimp** | sidecar `mcp-mailchimp` (node) | **`wi_tools`** | 17 **draft-only**: `create_campaign`, `update_campaign`, `set_campaign_content`, `send_test_email`, `list_audiences/templates/campaigns`, … | send/schedule/delete withheld at the gateway; **blocked on the Infisical key** |
+| **wordpress** | sidecar `mcp-wordpress` | `fleet_tools` | `wp_create_draft`, `wp_update_post`, `wp_get_post`, `wp_publish`, `wp_upload_media`, `wp_list_categories`, `account_status` | content-bot role; **WI site only** (not per-client yet) |
+| **higgsfield** | sidecar `mcp-higgsfield` | `fleet_tools` | `create_image_job`, `get_image_job`, `list_image_models`, `verify_url`, `account_status` | async: `create_image_job` → poll `get_image_job` |
+| **spaces** | sidecar `mcp-spaces` → **R2** | `fleet_tools` | `spaces_list`, `spaces_read`, `spaces_write`, `spaces_ingest_url`, `spaces_presign`, `spaces_delete` | asset store, bucket `fleet-clients` (see §6 Cloudflare) |
+| **memory** | sidecar `mcp-memory` | `fleet_tools` | `memory_remember`, `memory_search`, `memory_stats`, `memory_register_client` | pgvector, per-client RLS + per-agent (§8) |
+
+**Not in the registry:** Firecrawl is a Hermes **plugin** (`web/firecrawl`), not a litellm MCP;
+`mcp-a2a` (`ask_pm`/`create_pm_task`/`notify_client_hermes`) and `mcp-social-extras` are
+**OpenClaw-era / legacy** (superseded by `postiz_extras` + `lnkbio`; the a2a Coolify service is exited).
+
+### Sidecar build pattern
 
 Each `mcp-*/` is a self-hosted MCP server, its own Coolify service:
 `python:3.12-slim` (mailchimp = `node:20-slim`), `from mcp.server.mcpserver import MCPServer`,
@@ -270,7 +294,8 @@ Each `mcp-*/` is a self-hosted MCP server, its own Coolify service:
 streamable_http_path="/mcp", stateless_http=True)`. `infisical_fetch.py` pulls creds (Infisical
 `/shared` + per-client paths, Coolify-env fallback). Must be on the litellm docker network
 (`connect_to_docker_network=true` / "Connect to Predefined Networks" toggle) and bind `0.0.0.0`; wire
-into `litellm-cfg/config.yaml` under `mcp_servers:` with an `access_groups:` entry.
+into `litellm-cfg/config.yaml` under `mcp_servers:` with an `access_groups:` entry (and an
+`allowed_tools:` allow-list to withhold tools, as postiz/mailchimp do).
 
 **Deployed Coolify services** (fleet-relevant): `fleet-core-litellm`, `fleet-core-mcp-memory`,
 `fleet-core-mcp-spaces`, `fleet-core-infisical`, `fleet-core-mcp-a2a` (exited), `mcp-postiz-extras`,
