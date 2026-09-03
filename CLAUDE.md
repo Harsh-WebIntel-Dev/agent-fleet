@@ -196,11 +196,18 @@ actually happened.
 
 ---
 
-## 6. LiteLLM gateway (models, keys, tools)
+## 6. Platform infrastructure — LiteLLM · Cloudflare · Infisical
 
-- Coolify service `fleet-core-litellm` (`v10up2yg1cwxo0k1ks9j2qro`). **Live config is a host
-  bind-mount: `/home/harsh/litellm-cfg/config.yaml`** (NOT `nemoclaw/litellm/config.yaml`, which is
-  an older copy). `docker restart` the container reloads it (~108s to healthy).
+### LiteLLM gateway (models, keys, tools)
+
+- Coolify service `fleet-core-litellm` (`v10up2yg1cwxo0k1ks9j2qro`). Image
+  `ghcr.io/berriai/litellm:main-stable` wrapped by **`litellm-wrapper/`** — a fail-safe entrypoint
+  that at boot pulls its provider keys, tool tokens, and `LITELLM_MASTER_KEY` from **Infisical
+  `/shared`** (`DEEPSEEK_API_KEY`, `DO_INFERENCE_KEY`, `SEMRUSH_API_KEY`, `POSTIZ_MCP_TOKEN`,
+  `CLICKUP_MCP_TOKEN`), falling back to the Coolify env if Infisical is unreachable (never blocks boot).
+- **Live config is a host bind-mount: `/home/harsh/litellm-cfg/config.yaml`** (NOT
+  `nemoclaw/litellm/config.yaml`, an older copy; a `LITELLM_CONFIG_B64` env mechanism also exists).
+  `docker restart` the container reloads it (~108s to healthy).
 - **Aggregated MCP endpoint** `/mcp/` (streamable-HTTP). Servers are grouped by **access group**
   (`fleet_tools`, `fleet_internal`, `wi_tools`) and can carry a server-level `allowed_tools` allow-list.
 - **Keys / scoping:**
@@ -218,6 +225,40 @@ actually happened.
   (caused a ~15-min Postiz outage). No PATCH. To change a config-defined server: edit `config.yaml` +
   `DELETE /v1/mcp/server/{id}` + restart (re-seeds from config). A key's `blocked_tools` does NOT
   filter `tools/list` — use server `allowed_tools`.
+
+### Cloudflare (DNS + R2)
+
+- **DNS.** `widev.com.au` is on **Cloudflare** (nameservers `simon`/`hope.ns.cloudflare.com`). The
+  wildcard `*.widev.com.au` and the fleet records (`wi-agent`, `postiz`, …) point **directly to
+  prod-2 `46.250.245.204` — DNS-only, NOT proxied**; Traefik on the box terminates TLS, so every
+  FQDN is internet-facing the moment its container starts. Cloudflare here is authoritative DNS, not
+  a proxy/WAF. (The agency's own site webintelligenz.com is also on Cloudflare, but that's separate.)
+- **R2 (object storage) — the fleet asset store.** Account `023cf06b87e6b0abe3065ec0a8f79b79`,
+  endpoint `…r2.cloudflarestorage.com`, bucket **`fleet-clients`**, key layout `clients/<slug>/…`
+  (brand kits, templates, fonts, logos, rendered cards, QA sources). Two access paths:
+  - **mcp-spaces** (`fleet-core-mcp-spaces`) — S3-compatible MCP (`spaces_ingest_url/presign/read/
+    write`). Env names are legacy `DO_SPACES_*` but point at R2 (live: `BUCKET=fleet-clients`,
+    endpoint `023cf06b….r2.cloudflarestorage.com`). Creds (`R2_ACCESS_KEY_ID`/`_SECRET_ACCESS_KEY`)
+    pulled from Infisical.
+  - **sandbox rclone** (`r2:fleet-clients`) — the sandbox's ONE outbound capability, for moving full
+    binary brand kits the `spaces_*` tools can't. Token is **bucket-scoped + IP-filtered to prod-2**,
+    staged at recreate via `R2_CREDS_FILE` (not baked) — re-provide it when re-running `setup-sandbox.sh`.
+
+### Infisical (secrets store)
+
+Self-hosted secrets = Coolify service `fleet-core-infisical` (containers: `infisical` + postgres +
+redis + a **tailscale-proxy** sidecar). **Tailnet-only — not internet-facing.**
+
+- **Access:** service-to-service via the Tailscale IP **`http://100.115.104.5:18789`** (the
+  `INFISICAL_API_URL` default in `infisical_fetch.py`); admin UI via Tailscale Serve HTTPS `…ts.net:8443`.
+- **Auth:** machine identity (Universal Auth `clientId`/`clientSecret`). Secrets live at
+  `environment=prod`, path **`/shared`** (fleet-wide) + **`/clients/<slug>`** (per-client).
+- **Integration = PULL, fail-safe.** Every service's entrypoint runs `infisical_fetch.py` to pull the
+  secrets it needs at boot; if Infisical is down it falls back to the Coolify env and boots anyway.
+  Coolify is **not** a sync target — Infisical never pushes.
+- **Gotchas:** a `SITE_URL`/HTTPS misconfig blocks machine-identity creation; the `fleet-hermes`
+  identity is **read-only Viewer** (can't stage NEW secrets — which is why the Mailchimp key is
+  currently blocked; staging needs an admin token).
 
 ---
 
@@ -331,8 +372,8 @@ drops it). Never connect the webui to the sandbox's own network (breaks Traefik 
 
 **Infisical / Coolify env only — NEVER commit keys.** `.gitignore` excludes `.env*`, `*.key`, `*.pem`,
 `secrets/`, backups, scratch. Sidecars read creds via `infisical_fetch.py`; LiteLLM config uses
-`os.environ/…`. Official / first-party MCPs only; else call the vendor REST API directly. Self-hosted
-**Infisical** = `fleet-core-infisical` (Tailscale-only HTTPS; pull-based, Coolify is not a sync target).
+`os.environ/…`. Official / first-party MCPs only; else call the vendor REST API directly. The
+secrets store is self-hosted **Infisical** — see §6 for its access, auth, and pull-based model.
 
 ---
 
