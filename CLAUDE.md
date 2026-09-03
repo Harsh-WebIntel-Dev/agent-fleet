@@ -127,7 +127,8 @@ only to webintelligenz.com, so a client's WP *publishing* is held until per-clie
 task needs), each carrying the ClickUp `task_id`, a stage brief in his words, and "read the task +
 comments first". Build the graph with `kanban decompose` where possible; verify parent links. The
 dispatcher runs each specialist when its parents are `done`. Then he tells the person it's with the
-team and stops.
+team and stops. (The dispatcher runs in the gateway every 60s; concurrency is capped at **4 cards
+in progress fleet-wide, 1 per specialist** — `kanban:` in config.)
 
 **4 — The review gate is Webster's — there is NO QA agent.** Nothing reaches a human until he has:
    1. **Re-fetched every artefact himself** (`wp_get_post`, hero URL, Postiz preview) — a specialist's
@@ -190,7 +191,7 @@ actually happened.
 | `mcp-spaces/` | R2 / DO Spaces asset store (ingest/presign/read/write) | current |
 | `mcp-a2a/` | Agent-to-agent comms (`ask_pm`/`create_pm_task`) | OpenClaw-era, mostly legacy |
 | `mcp-social-extras/` | older social helper | legacy |
-| `firecrawl/`, `searxng/` | self-hosted crawl + search backends | current (infra) |
+| `firecrawl/` (+ `searxng/`) | self-hosted **Firecrawl** (runs with **SearXNG** + Redis) — the fleet's web-crawl/search backend, reached via the Hermes `web/firecrawl` plugin | current (infra) |
 | `clickup-bridge/`, `clickup-sweep/` | OpenClaw-era ClickUp intake (`bridge.js`/`sweep.js`) | **superseded** by Hermes crons |
 | `openclaw/`, `nemoclaw/`, `plan/` | earlier builds + planning | **superseded** / reference |
 
@@ -220,7 +221,15 @@ actually happened.
   V4 Pro). DeepSeek-direct via the deepseek key; other models via DigitalOcean GenAI
   (`inference.do-ai.run`, `DO_INFERENCE_KEY`) — premium tiers can be 403 tier-gated. **Vision** for all
   agents is a LiteLLM `vision` alias (→ DO llama-4-maverick), wired via `auxiliary.vision` in
-  `config.yaml`. **Embeddings** = `embed` alias (bge-m3, 1024-dim) used by mcp-memory.
+  `config.yaml`. **Embeddings** = `embed` alias (bge-m3, 1024-dim) used by mcp-memory. Tiers seen:
+  `flash`, `fast`, `standard`, `deep`, `vision`, `embed`.
+- **Model routing & per-client billing (`providers:` in the Hermes config).** Hermes reaches models
+  ONLY through litellm (`…:4000/v1`, `discover_models:false`). The default provider `litellm` uses the
+  WI agency key (`OPENAI_API_KEY`); three per-client providers `litellm-<slug>` use that client's
+  `key_env` (`LITELLM_KEY_BIOGONE`, `_PRIDE_ADVICE`, `_RADIANCE_WEALTH`). Each stamps an
+  `x-litellm-tags` header (agent/client/fleet) for spend attribution. Setting `provider="litellm-<slug>"`
+  on a kanban card (§4) makes the specialist run on that client's key → their budget. Key/budget/spend
+  **state lives in `litellm-postgres`**; litellm also has a `tailscale-proxy` sidecar.
 - **⚠️ DESTRUCTIVE TRAP:** `POST /v1/mcp/server` **replaces** a record and **nulls** omitted fields
   (caused a ~15-min Postiz outage). No PATCH. To change a config-defined server: edit `config.yaml` +
   `DELETE /v1/mcp/server/{id}` + restart (re-seeds from config). A key's `blocked_tools` does NOT
@@ -301,6 +310,12 @@ into `litellm-cfg/config.yaml` under `mcp_servers:` with an `access_groups:` ent
 `fleet-core-mcp-spaces`, `fleet-core-infisical`, `fleet-core-mcp-a2a` (exited), `mcp-postiz-extras`,
 `mcp-lnkbio`, `mcp-mailchimp`, `mcp-higgsfield`, `mcp-wordpress`, `firecrawl`, `hermes-agent-for-
 webintelligenz`, plus `postiz`, `n8n`, `metabase`, and the `elmo*` trackers.
+
+Several are **multi-container stacks**: `fleet-core-litellm` (+ Postgres + tailscale-proxy),
+`fleet-core-infisical` (+ Postgres/Redis/tailscale-proxy), `firecrawl` (+ SearXNG + Redis), and the
+self-hosted `postiz` (+ a full **Temporal** stack: temporal/ui/postgresql/elasticsearch + Redis —
+Postiz's scheduler; upgrading Postiz is not a tag bump). `n8n`/`metabase`/`elmo*` belong to the
+separate dashboard/AI-visibility projects on the same box, not the fleet core.
 
 ---
 
