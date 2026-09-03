@@ -1,9 +1,9 @@
 # CLAUDE.md — Agent Fleet
 
 Guidance for Claude Code (and humans) working in this repo. This documents the **current, deployed**
-system as of **2026-09-03**. Where an older subfolder README disagrees (e.g. `hermes/README.md` still
-describes an "OpenClaw does the work" model), **this file is the authority** — the live system is the
-Hermes-native fleet below.
+system as of **2026-09-04** (reconciled against a read-only live audit of prod-2 that date). Where an
+older subfolder README disagrees (e.g. `hermes/README.md` still describes an "OpenClaw does the work"
+model), **this file is the authority** — the live system is the Hermes-native fleet below.
 
 ---
 
@@ -16,7 +16,10 @@ before anything goes live.
 
 - **Runtime:** [Hermes](https://github.com/nousresearch/hermes-agent) — an agent runtime with
   profiles, toolsets, an in-process cron scheduler, a webui, and an MCP client. Replaced an OpenClaw
-  build on **2026-08-24** (`openclaw/`, `nemoclaw/` are **superseded**, kept for history).
+  build on **2026-08-24** (`openclaw/`, `nemoclaw/` are **superseded**, kept for history). Deployed:
+  agent **v0.20.4 (`v2026.8.18`)** on **webui 0.52.247** (pinned by digest `d483b07…`) — see
+  `hermes/compose.yml`. The old "pin below v0.19.0" note is **resolved history**, not an active pin
+  (§15).
 - **Model gateway:** self-hosted **LiteLLM** — the single front door for models, virtual keys,
   budgets, and the aggregated MCP tool endpoint.
 - **Tools:** first-party MCPs (ClickUp, Postiz, Semrush, Higgsfield) + self-hosted **sidecars**
@@ -60,6 +63,11 @@ mechanism*, never the individual task.
   **drift** — always read the live file first and keep a dated `.bak-*`.
 - **Webui (public):** `https://wi-agent.widev.com.au` — password-only, internet-facing; blast radius
   bounded by per-client budget-capped keys.
+- **Agent-to-agent (A2A) — LIVE, internal-only:** the built-in Hermes A2A transport is **enabled**
+  (`gateway.platforms.a2a.enabled: true`), listening on **port 9900**, **not internet-facing** (bound
+  to the docker network, `traefik.enable=false`, no published port). Paired with
+  **`gateway.multiplex_profiles: true`**, whose allowlist is the **5 specialists**. This is a live,
+  first-party capability — **distinct from the retired `mcp-a2a` sidecar** (§7), which is legacy/dead.
 
 ---
 
@@ -223,6 +231,11 @@ actually happened.
   agents is a LiteLLM `vision` alias (→ DO llama-4-maverick), wired via `auxiliary.vision` in
   `config.yaml`. **Embeddings** = `embed` alias (bge-m3, 1024-dim) used by mcp-memory. Tiers seen:
   `flash`, `fast`, `standard`, `deep`, `vision`, `embed`.
+  - **⚠️ Discrepancy to confirm (2026-09-04):** live `config.yaml` runs the default profile (Webster)
+    on **`model.default: standard`**, not `flash` as the reasoning above describes. Intent
+    **unconfirmed** — this may be a deliberate quality change or a drift. Verify which model
+    `webster-pm` actually bills via the litellm spend logs before acting on either the flash rationale
+    or this note.
 - **Model routing & per-client billing (`providers:` in the Hermes config).** Hermes reaches models
   ONLY through litellm (`…:4000/v1`, `discover_models:false`). The default provider `litellm` uses the
   WI agency key (`OPENAI_API_KEY`); three per-client providers `litellm-<slug>` use that client's
@@ -346,7 +359,7 @@ The in-process scheduler runs in `hermes-agent`; jobs in `cron/jobs.json`; manag
 | `marketing-task-sweep` | `12b1e0f820e9` | 15m | **MCP-only** (no gate): Webster lists his actionable ClickUp tasks himself and composes/reviews. |
 | `clickup-chat-intake` | `f3d04e2607f5` | 5m | `monitor_chat.py` gate → reads the changed channel; DM = answer all, group = only if @tagged. |
 | `semrush-blog-global-feed` | `21cb02f87693` | 07:00 | Ingest SEMrush blog → global memory + Spaces `clients/global/semrush-feed.md`. |
-| `review-notify` | `415989b00956` | 15m | Emails reviewers "ready for review". **Currently failing** ("email has no gateway credentials") — email platform is enabled but the cron's `deliver: email` SMTP creds are not loaded; verify before relying on it. |
+| `review-notify` | `415989b00956` | 15m | Emails all 4 reviewers "ready for review"; gated by `monitor_review.py` (`deliver: email`). **Green as of 2026-09-04** — last ~20 runs completed (a delivered email couldn't be forced in a read-only check; see §16). |
 
 **Monitor-gate pattern:** a job may name a `monitor_script`/`monitor_url`; Hermes runs it each tick and
 wakes the LLM only when its output hash **changes**. The task-sweep deliberately has **no** gate; the
@@ -415,6 +428,10 @@ drops it). Never connect the webui to the sandbox's own network (breaks Traefik 
 `os.environ/…`. Official / first-party MCPs only; else call the vendor REST API directly. The
 secrets store is self-hosted **Infisical** — see §6 for its access, auth, and pull-based model.
 
+- **⚠️ Known deviation (2026-09-04 audit):** the live Hermes `config.yaml` `mcp_servers.pm_comms`
+  carries an **inline bearer token** rather than an `os.environ/…` reference, contrary to the policy
+  above. **Move it to an env var and rotate** the exposed key. (No value is recorded here.)
+
 ---
 
 ## 15. Known traps (index)
@@ -427,8 +444,13 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
 - Memory global recall needs `across_agents=True` (per-agent scoping by default).
 - Postiz `delete` returns 500-means-success and removes only the Postiz record, not the live post; a
   recreate at a slot already passed publishes a **duplicate** (postiz-extras has a 15-min past-slot guard).
-- `hermes-agent` upgrades past `v0.19.0 (2026.7.20)` crash-loop the webui (wheel-install guard) — pin
-  deliberately; deployed agent is `v2026.8.18`.
+- **[RESOLVED 2026-08-19 — history, not an active pin]** `hermes-agent` past `v0.19.0 (2026.7.20)`
+  refuses wheel builds (`setup.py` guard); the old webui `docker_init.bash` did a wheel install
+  (`uv pip install "$_stage_src[all]"`), so those agents crash-looped the webui. Upstream fixed it
+  **2026-07-29** — webui now installs editable (`uv pip install -e`). The fleet then upgraded (for
+  **A2A**, §2) to agent **v0.20.4 (`v2026.8.18`)** on **webui 0.52.247** (pinned by digest
+  `d483b07…`), healthy with 0 restarts. `hermes/compose.yml` documents this in full; there is no
+  longer a version to hold below.
 - prod-2 load is largely hypervisor **CPU steal**, not fleet workload — removing services won't fix it.
 
 ---
@@ -437,8 +459,10 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
 
 - **Mailchimp key** — MCP built/wired/scoped (draft-only, WI-only) but **blocked** on staging
   `MAILCHIMP_API_KEY` into Infisical `/shared` (needs an admin token).
-- **review-notify email delivery** — failing ("no gateway credentials"); verify the email platform's
-  SMTP creds are loaded.
+- **review-notify email delivery** — **resolved pending confirmation (2026-09-04):** the cron is
+  green (last ~20 runs completed, gated by `monitor_review.py`, `deliver: email` to all 4 reviewers).
+  A delivered email could not be forced in a read-only audit — confirm a reviewer actually received
+  one before closing this out.
 - **Per-client WordPress** — client keys can't publish to their own sites yet; client WP publishing is
   held until wired.
 
