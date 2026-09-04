@@ -44,10 +44,15 @@ mechanism*, never the individual task.
 
 - **Host:** prod-2 `46.250.245.204`, SSH alias **`webintelligenz-prod-2`** (user `harsh`, in `docker`
   group → `docker` works without sudo; root login is not key-authorized). Managed by **Coolify**.
-- **Containers** (share the `hermes-home` volume at `/home/hermes/.hermes`):
-  - `hermes-agent-zhvjhbo5752ovx1nl2rk9v30` — agent + in-process cron scheduler (the "gateway").
-  - `hermes-webui-zhvjhbo5752ovx1nl2rk9v30` — web UI (front-end only, no scheduler).
-  - `hermes-sandbox` — the **isolated** terminal/code sandbox (see §12).
+- **Containers:**
+  - `hermes-agent-zhvjhbo5752ovx1nl2rk9v30` — mounts `hermes-home` at `/home/hermes/.hermes`. Runs
+    the gateway (messaging + in-process cron scheduler) **and** the HTTP dashboard/Desktop backend,
+    as two separate supervised s6 slots in one container. **This is the only container that may
+    mount `hermes-home`** — see §12a.
+  - `hermes-sandbox` — the **isolated** terminal/code sandbox (see §12). Does NOT mount `hermes-home`.
+  - (`hermes-webui-…` was removed 2026-09-04 — see §12a. Coolify still holds stale sub-application
+    records for it and for a short-lived `hermes-serve`, which is why the service reads
+    `degraded:unhealthy` while the one real container is healthy.)
 - **Hermes CLI:** **`/opt/hermes/.venv/bin/hermes`** inside `hermes-agent` (NOT on `$PATH`; `tirith`
   in `~/.hermes/bin` is a shell-security guard, not the CLI).
   ```bash
@@ -58,8 +63,13 @@ mechanism*, never the individual task.
   `config.yaml`, `cron/jobs.json`. **SOULs are read per-turn — edit live, no restart.** The deployed
   SOULs are the **source of truth**; `hermes/souls/*.SOUL.md` in this repo are original templates that
   **drift** — always read the live file first and keep a dated `.bak-*`.
-- **Webui (public):** `https://wi-agent.widev.com.au` — password-only, internet-facing; blast radius
-  bounded by per-client budget-capped keys.
+- **HTTP surfaces (both tailnet-only, `traefik.enable=false`):**
+  - `http://100.115.104.5:18794` → container `:9900` — **A2A** (agent card + JSON-RPC, bearer token
+    `fleet`). Also fronted by `tailscale serve` at `https://…ts.net:8447`.
+  - `http://100.115.104.5:18795` → container `:9119` — **dashboard / Hermes Desktop backend**
+    (basic auth). See §12a.
+  - `https://wi-agent.widev.com.au` currently returns **503** — the public webui is gone and nothing
+    replaced it on that FQDN. Restoring a public browser UI is an open decision (§16).
 
 ---
 
@@ -346,7 +356,7 @@ The in-process scheduler runs in `hermes-agent`; jobs in `cron/jobs.json`; manag
 | `marketing-task-sweep` | `12b1e0f820e9` | 15m | **MCP-only** (no gate): Webster lists his actionable ClickUp tasks himself and composes/reviews. |
 | `clickup-chat-intake` | `f3d04e2607f5` | 5m | `monitor_chat.py` gate → reads the changed channel; DM = answer all, group = only if @tagged. |
 | `semrush-blog-global-feed` | `21cb02f87693` | 07:00 | Ingest SEMrush blog → global memory + Spaces `clients/global/semrush-feed.md`. |
-| `review-notify` | `415989b00956` | 15m | Emails reviewers "ready for review". **Currently failing** ("email has no gateway credentials") — email platform is enabled but the cron's `deliver: email` SMTP creds are not loaded; verify before relying on it. |
+| `review-notify` | `415989b00956` | 15m | Emails reviewers "ready for review". Monitor-gated (`monitor_review.py`). Running `ok` as of 2026-09-04 — the earlier "email has no gateway credentials" failure is no longer reproducing and the gateway logs `[Email] Connected`. |
 
 **Monitor-gate pattern:** a job may name a `monitor_script`/`monitor_url`; Hermes runs it each tick and
 wakes the LLM only when its output hash **changes**. The task-sweep deliberately has **no** gate; the
@@ -388,7 +398,67 @@ Terminal + code_execution run via `terminal.backend: ssh` into **`hermes-sandbox
 network, no secrets, non-root `sandbox` user. Image bakes chromium, `render-card` (HTML→PNG),
 `qa-shot`, Pillow, rclone, tzdata. `setup-sandbox.sh` provisions it and **wires the network link (step
 4) — re-run it after any Webster redeploy** (a `docker restart` keeps the link; a redeploy/recreate
-drops it). Never connect the webui to the sandbox's own network (breaks Traefik → webui outage).
+drops it). Never connect a Traefik-routed container to the sandbox's own network — a container with no
+`traefik.docker.network` label loses its public route when you add a network Traefik isn't on (this
+caused a webui outage 2026-08-26; the agent itself is `traefik.enable=false`, so it is unaffected).
+
+Two things about `setup-sandbox.sh` worth knowing before you run it: it is **idempotent** and will
+NOT recreate a running sandbox (step 3 is guarded), so the sandbox's own filesystem — including the
+rclone/R2 config — survives an agent redeploy untouched. And its `R2_CREDS_FILE` step is **optional**:
+with no creds file present it skips rclone provisioning and says so, which is harmless when the
+sandbox already has a working `r2:` remote. Its webui symlink/known-hosts steps now fail loudly
+(`No such container: hermes-webui-…`) — expected and harmless, the webui is gone.
+
+---
+
+## 12a. HTTP surfaces on the agent container — and the one-container rule
+
+**Never add a second container that mounts `hermes-home`.** Not `hermes serve`, not a webui, not
+anything. The image's `docker/stage2-hook.sh` → `cont-init.d/02-reconcile-profiles` →
+`container_boot.reconcile_profile_gateways` registers a **supervised `gateway-default` s6 slot in
+every such container** and auto-starts `hermes gateway run --replace` whenever `gateway_state.json`
+records `desired_state: running` — and that file lives on the shared volume. A sidecar is therefore
+not "another surface", it is a **second gateway** that steals platform ownership: on 2026-09-04 an
+added `hermes-serve` flipped `gateway_state.json`'s `writer_pid` for `email`, `a2a` **and**
+`api_server` to itself. There is no env switch to opt out. (The image's only opt-out is argv-based:
+`container_boot._is_dashboard_container` skips reconciliation when PID 1 argv starts with
+`dashboard` — which a `serve` sidecar does not match. Do not rely on it; use the slot below.)
+
+**Instead, use the supervised `dashboard` slot the image already ships**, on the existing agent
+container. Verified against the deployed image `v2026.8.18`:
+
+| | |
+|---|---|
+| slot | `/etc/s6-overlay/s6-rc.d/dashboard` (`longrun`, symlinked into `/run/service/dashboard`) |
+| gate | `HERMES_DASHBOARD` truthy (`1\|true\|TRUE\|True\|yes\|YES\|Yes`). Unset → `run` exits 0 and `finish` returns **125** (s6 "permanent failure, don't restart"), so the slot honestly reports `down` |
+| command | `hermes dashboard --host "${HERMES_DASHBOARD_HOST:-0.0.0.0}" --port "${HERMES_DASHBOARD_PORT:-9119}" --no-open` (as `s6-setuidgid hermes`) |
+| `_HOST` / `_PORT` | read **only by the s6 shell script**, not by Python — they become `--host`/`--port` |
+| auth | `HERMES_DASHBOARD_BASIC_AUTH_USERNAME` + `_PASSWORD` (or `_PASSWORD_HASH`, preferred) + `_SECRET` (HMAC session-signing key) + optional `_TTL_SECONDS`. Alternative provider: `HERMES_DASHBOARD_OAUTH_CLIENT_ID` |
+| not a bypass | `HERMES_DASHBOARD_INSECURE` is **accepted and ignored** since the June 2026 hardening — it only prints a warning |
+
+`hermes dashboard` and `hermes serve` are **one backend** — both are `cmd_dashboard` →
+`web_server.start_server`; `serve` merely adds `headless_backend=True` to skip the SPA build. So the
+slot serves exactly the `/api/*` contract Hermes Desktop probes (`GET /api/health` → `GET /api/status`
+→ `WS /api/ws`), plus the browser SPA. `/api/health` and `/api/status` are in
+`dashboard_auth.public_paths.PUBLIC_API_PATHS`, so healthchecks work with the gate on; everything else
+under `/api/` 401s.
+
+**Enabling it starts no second gateway** — verified three ways: the slot's `run` script execs
+`hermes dashboard` and nothing else; `web_server` only *reads* `writer_pid` (only `gateway/status.py`
+writes platform ownership); and `start_server`'s lifespan forks a cron ticker / reaps gateway orphans
+**only** under `HERMES_DESKTOP=1`, which is unset in the container. Live proof after the 2026-09-04
+rollout: `dashboard` pid 165 and `gateway-default` pid 204 both up, with all three platforms
+(`a2a`, `api_server`, `email`) reporting `writer_pid=204` — the gateway's own pid.
+
+Auth is **mandatory and fail-closed**: `should_require_auth()` treats any non-loopback bind — tailnet
+and RFC1918 included — as public, and `start_server` refuses to boot without a registered
+`DashboardAuthProvider`. `HERMES_DASHBOARD_HOST=0.0.0.0` is the **container-side** bind; the published
+port `100.115.104.5:18795:9119` pins the **host** side to the Tailscale IP, so the surface is
+tailnet-only despite the wildcard bind (same shape as A2A). Credentials live in Coolify env vars
+(`HERMES_DASHBOARD_BASIC_AUTH_USERNAME` / `_PASSWORD` / `_SECRET`) — never in source.
+
+Hermes Desktop connects in **remote-URL mode** (not SSH) to `http://100.115.104.5:18795`, on the
+tailnet, with the basic-auth credentials.
 
 ---
 
@@ -397,11 +467,20 @@ drops it). Never connect the webui to the sandbox's own network (breaks Traefik 
 - **SOUL edits:** read the **live** file, keep a dated `.bak-*`, edit, stream back as `hermes`, `diff`.
   Read per-turn → **no restart**.
 - **MCP tool / `config.yaml` / model changes:** clear `cache/mcp_schema_cache.json` +
-  `tool_discovery_cache.json` (main **and** `profiles/*/cache/`) and **restart both** hermes containers
-  — each process caches tool schemas independently.
-- **Restart vs redeploy:** `docker restart -t 30 <agent> <webui>` preserves volumes + the sandbox link;
+  `tool_discovery_cache.json` (main **and** `profiles/*/cache/`) and **restart the agent container**
+  — note there are now two *processes* caching tool schemas independently in that one container (the
+  gateway and the dashboard), so restart the container rather than signalling one slot.
+- **Restart vs redeploy:** `docker restart -t 30 <agent>` preserves volumes + the sandbox link;
   a Coolify **redeploy recreates** the container → drops the sandbox link (re-run `setup-sandbox.sh`).
-  Restart only in a **quiet window** (`hermes cron runs` shows nothing in-flight).
+  Restart only in a **quiet window** (`hermes cron runs` + `hermes kanban list` show nothing in
+  flight). The 5-minute `clickup-chat-intake` is monitor-gated, so it only writes a ledger entry when
+  its hash changes — don't wait for a gap that never appears; check `cron status` for `Next run` and
+  aim between the two 15-minute jobs.
+- **Coolify compose edits:** `service update` **replaces the whole body** — fetch
+  `docker_compose_raw` first, keep a byte-for-byte backup, and diff before sending. Coolify 4.1.2
+  **re-serialises the YAML and strips comments**, so explanatory comments survive only in
+  `hermes/compose.yml` in this repo, not in the stored body. Verify the result semantically (service
+  set, env, ports, labels) rather than by string equality.
 - **Hard rules:** explain state-changing actions **before** doing them; never touch a running process
   to "nudge" it; never put yourself in the middle of Webster's autonomous flow; treat Webster as a peer
   LLM.
@@ -419,9 +498,15 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
 
 ## 15. Known traps (index)
 
+- **A second container mounting `hermes-home` starts a competing gateway** and steals `email`/`a2a`/
+  `api_server` ownership. No env opt-out. Add HTTP surfaces via the image's `dashboard` s6 slot on the
+  existing agent container instead — §12a.
 - LiteLLM `POST /v1/mcp/server` is destructive (nulls fields); no PATCH → edit config + DELETE + restart.
-- Two Hermes processes cache MCP schemas independently → clear both caches + restart both for tool changes.
+- Two Hermes **processes** cache MCP schemas independently (gateway + dashboard, now both inside the
+  one agent container) → clear the caches and restart the container for tool changes.
 - Sandbox network link is not Coolify-managed → re-run `setup-sandbox.sh` after a redeploy.
+- Coolify `service update` replaces the whole compose body **and strips YAML comments** — back up
+  `docker_compose_raw` and diff first (§13).
 - Never wrap `hermes cron run` in `timeout` (baselines-without-processing → stuck "no change"); a
   cron's first tick inside its creating webui session logs a **false** `failed`.
 - Memory global recall needs `across_agents=True` (per-agent scoping by default).
@@ -437,10 +522,19 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
 
 - **Mailchimp key** — MCP built/wired/scoped (draft-only, WI-only) but **blocked** on staging
   `MAILCHIMP_API_KEY` into Infisical `/shared` (needs an admin token).
-- **review-notify email delivery** — failing ("no gateway credentials"); verify the email platform's
-  SMTP creds are loaded.
+- **No public browser UI** — `wi-agent.widev.com.au` returns **503** since the webui container was
+  removed (2026-09-04). The dashboard SPA is now served by the agent's own `dashboard` slot but is
+  **tailnet-only** on `100.115.104.5:18795`, so anyone off the tailnet has no browser access.
+  Decision needed: leave it tailnet-only (safer — the old webui was password-only on the public
+  internet), front `:18795` with `tailscale serve` like A2A's `:8447`, or put Traefik back on the
+  FQDN. Note the compose deliberately keeps `traefik.enable=false`; re-exposing publicly is a
+  security decision, not a config tweak. Coolify's stale `hermes-webui` / `hermes-serve`
+  sub-application records should be deleted at the same time (they are what make the service read
+  `degraded:unhealthy`).
 - **Per-client WordPress** — client keys can't publish to their own sites yet; client WP publishing is
   held until wired.
+- ~~**review-notify email delivery**~~ — resolved: as of 2026-09-04 the job runs `ok` and the gateway
+  logs `[Email] Connected as technology@webintelligenz.com`. Remove this once confirmed over a few days.
 
 ---
 
