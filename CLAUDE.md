@@ -15,7 +15,8 @@ dependency chain. ClickUp is the source of truth; specialists produce the work; 
 before anything goes live.
 
 - **Runtime:** [Hermes](https://github.com/nousresearch/hermes-agent) — an agent runtime with
-  profiles, toolsets, an in-process cron scheduler, a webui, and an MCP client. Replaced an OpenClaw
+  profiles, toolsets, an in-process cron scheduler, a headless `serve` backend, and an MCP client.
+  Replaced an OpenClaw
   build on **2026-08-24** (`openclaw/`, `nemoclaw/` are **superseded**, kept for history).
 - **Model gateway:** self-hosted **LiteLLM** — the single front door for models, virtual keys,
   budgets, and the aggregated MCP tool endpoint.
@@ -46,7 +47,9 @@ mechanism*, never the individual task.
   group → `docker` works without sudo; root login is not key-authorized). Managed by **Coolify**.
 - **Containers** (share the `hermes-home` volume at `/home/hermes/.hermes`):
   - `hermes-agent-zhvjhbo5752ovx1nl2rk9v30` — agent + in-process cron scheduler (the "gateway").
-  - `hermes-webui-zhvjhbo5752ovx1nl2rk9v30` — web UI (front-end only, no scheduler).
+  - `hermes-serve-zhvjhbo5752ovx1nl2rk9v30` — the headless **`hermes serve`** backend the team's
+    Hermes Desktop clients connect to (same image, same volume → the same Webster). Replaced the
+    public browser webui on **2026-09-04**. Runs agent turns, so it needs the sandbox link too (§12).
   - `hermes-sandbox` — the **isolated** terminal/code sandbox (see §12).
 - **Hermes CLI:** **`/opt/hermes/.venv/bin/hermes`** inside `hermes-agent` (NOT on `$PATH`; `tirith`
   in `~/.hermes/bin` is a shell-security guard, not the CLI).
@@ -58,8 +61,34 @@ mechanism*, never the individual task.
   `config.yaml`, `cron/jobs.json`. **SOULs are read per-turn — edit live, no restart.** The deployed
   SOULs are the **source of truth**; `hermes/souls/*.SOUL.md` in this repo are original templates that
   **drift** — always read the live file first and keep a dated `.bak-*`.
-- **Webui (public):** `https://wi-agent.widev.com.au` — password-only, internet-facing; blast radius
-  bounded by per-client budget-capped keys.
+- **Exposure: nothing in this stack is internet-facing.** Both containers are `traefik.enable=false`
+  and publish only on the tailnet IP `100.115.104.5` — `18794` (A2A) and `18795` (Desktop backend).
+  The public webui at `wi-agent.widev.com.au` was **removed 2026-09-04**; that hostname now returns
+  Traefik's generic no-route 503. Reaching Webster at all requires being on the tailnet.
+
+### Connecting Hermes Desktop (how the team reaches Webster)
+
+Each team member points their Hermes Desktop at the **remote backend**, on the tailnet:
+
+| | |
+|---|---|
+| **URL** | `http://100.115.104.5:18795` |
+| **Auth** | username + password (provider `basic`); credentials live in Coolify env `SERVICE_USER_HERMESSERVE` / `SERVICE_PASSWORD_HERMESSERVE` — ask the admin, they are not in this repo |
+| **Requires** | being on the Tailscale tailnet |
+
+Desktop's readiness probe is `GET /api/health` → `GET /api/status` (its `auth_required` field picks the
+auth mode) → `WS /api/ws`. **Only `hermes serve` serves those `/api/*` routes.** `gateway run` (what
+`hermes-agent` runs), the A2A endpoint on `:9900`/`:18794` and the `api_server` platform on `:8642` all
+return a bare 404 — that 404, in a 45s boot loop, is what every earlier attempt hit.
+
+Auth is not optional: `should_require_auth()` treats **any** non-loopback bind — a tailnet address
+included — as public and engages the gate, and once gated the static dashboard session token is
+rejected. So a real provider must be registered or the backend is unusable. Sessions are signed with
+`SERVICE_PASSWORD_HERMESSERVESECRET`; without it a random per-process key is used and every restart
+silently logs the whole team out.
+
+A Desktop session is a **real Webster turn** on the shared volume — same SOULs, profiles, memory and
+kanban as the cron-driven fleet, and its `terminal`/`code_execution` go to `hermes-sandbox` (§12).
 
 ---
 
@@ -353,9 +382,9 @@ wakes the LLM only when its output hash **changes**. The task-sweep deliberately
 chat intake keeps its gate because it does real channel-routing, not just cost-gating.
 
 **⚠️ Cron traps:** (a) a killed/`timeout`-wrapped `hermes cron run` can baseline-without-processing and
-stick "no change" — never wrap it in `timeout`. (b) A cron's first tick fired inside the webui session
-that created it records a **false** `failed` ledger status — re-run it standalone with `hermes cron run
-<id>` to prove/reset.
+stick "no change" — never wrap it in `timeout`. (b) A cron's first tick fired inside the UI session
+that created it (formerly the webui, now a Desktop `serve` session) records a **false** `failed`
+ledger status — re-run it standalone with `hermes cron run <id>` to prove/reset.
 
 ---
 
@@ -388,7 +417,13 @@ Terminal + code_execution run via `terminal.backend: ssh` into **`hermes-sandbox
 network, no secrets, non-root `sandbox` user. Image bakes chromium, `render-card` (HTML→PNG),
 `qa-shot`, Pillow, rclone, tzdata. `setup-sandbox.sh` provisions it and **wires the network link (step
 4) — re-run it after any Webster redeploy** (a `docker restart` keeps the link; a redeploy/recreate
-drops it). Never connect the webui to the sandbox's own network (breaks Traefik → webui outage).
+drops it). **BOTH** `hermes-agent` and `hermes-serve` run agent turns, so both need the wiring; the
+script does both. Skipping it does not error — `terminal`/`code_execution` silently fall back to running
+INSIDE the container. It also re-scans the sandbox host key into each container's
+`/opt/data/.ssh/known_hosts`, an **anonymous volume** that is empty again after every recreate.
+Historical trap, still worth honouring: never attach a **Traefik-routed** container to the sandbox's own
+network (it drops the public route — caused the webui outage 2026-08-26). Moot for `hermes-serve`,
+which is `traefik.enable=false`.
 
 ---
 
@@ -399,7 +434,7 @@ drops it). Never connect the webui to the sandbox's own network (breaks Traefik 
 - **MCP tool / `config.yaml` / model changes:** clear `cache/mcp_schema_cache.json` +
   `tool_discovery_cache.json` (main **and** `profiles/*/cache/`) and **restart both** hermes containers
   — each process caches tool schemas independently.
-- **Restart vs redeploy:** `docker restart -t 30 <agent> <webui>` preserves volumes + the sandbox link;
+- **Restart vs redeploy:** `docker restart -t 30 <agent> <serve>` preserves volumes + the sandbox link;
   a Coolify **redeploy recreates** the container → drops the sandbox link (re-run `setup-sandbox.sh`).
   Restart only in a **quiet window** (`hermes cron runs` shows nothing in-flight).
 - **Hard rules:** explain state-changing actions **before** doing them; never touch a running process
@@ -423,12 +458,16 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
 - Two Hermes processes cache MCP schemas independently → clear both caches + restart both for tool changes.
 - Sandbox network link is not Coolify-managed → re-run `setup-sandbox.sh` after a redeploy.
 - Never wrap `hermes cron run` in `timeout` (baselines-without-processing → stuck "no change"); a
-  cron's first tick inside its creating webui session logs a **false** `failed`.
+  cron's first tick inside its creating UI session logs a **false** `failed`.
 - Memory global recall needs `across_agents=True` (per-agent scoping by default).
 - Postiz `delete` returns 500-means-success and removes only the Postiz record, not the live post; a
   recreate at a slot already passed publishes a **duplicate** (postiz-extras has a 15-min past-slot guard).
-- `hermes-agent` upgrades past `v0.19.0 (2026.7.20)` crash-loop the webui (wheel-install guard) — pin
-  deliberately; deployed agent is `v2026.8.18`.
+- ~~`hermes-agent` upgrades past `v0.19.0` crash-loop the webui (wheel-install guard)~~ — **obsolete
+  twice over**: fixed upstream 2026-07-29, and the webui was removed 2026-09-04. Deployed agent image
+  is `v2026.8.18`; the running backend reports `0.20.4`.
+- `hermes serve` is the ONLY thing that serves `/api/*`. `gateway run`, the A2A endpoint and the
+  `api_server` platform all return a bare 404 there — pointing Hermes Desktop at any of them fails in
+  a 45s boot loop that looks like a network fault but is not.
 - prod-2 load is largely hypervisor **CPU steal**, not fleet workload — removing services won't fix it.
 
 ---

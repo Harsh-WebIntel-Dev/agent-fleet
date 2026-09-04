@@ -16,6 +16,10 @@
 # RE-RUN THIS AFTER ANY WEBSTER REDEPLOY. The image, network and sandbox container survive, but the
 # `docker network connect` that lets Webster reach the sandbox is NOT Coolify-managed and does not
 # survive a container RECREATION (a Coolify `deploy force:true`). A plain `docker restart` is fine.
+# BOTH hermes containers run agent turns and so BOTH need this wiring: hermes-agent (`gateway run` —
+# cron + kanban dispatch) and hermes-serve (`serve` — the backend Hermes Desktop clients connect to).
+# Skipping it does not error: terminal/code_execution silently fall back to running INSIDE the
+# container instead of the sandbox (see step 4c).
 # The ssh key (/home/hermes/.hermes/.ssh/sandbox_key) and config.yaml live in the persistent volume
 # and DO survive. The one-time key install + config wiring are NOT redone here (see NOTE below).
 set -eu
@@ -36,34 +40,37 @@ docker ps --format '{{.Names}}' | grep -qx "$SANDBOX" || docker run -d --name "$
 # 4) bridge Webster -> sandbox (idempotent). THIS is the step to re-run after a redeploy.
 docker network connect "$SANDBOX" "$C" 2>/dev/null || echo "  (agent already connected)"
 
-# 4b) WEB-UI ACCESS TO THE SANDBOX — DO NOT connect the webui to $SANDBOX (a 3rd network).
-# The webui container has NO `traefik.docker.network` label, so adding a network Traefik isn't on makes
-# Traefik unable to pick the backend network and it DROPS THE PUBLIC ROUTE (caused a webui outage
-# 2026-08-26). Instead, put the SANDBOX on the hermes SERVICE network ($SVC_NET) that the agent AND
-# webui are already on — both reach the sandbox with zero change to the webui / Traefik. That network
-# holds only the two hermes containers + the coolify-proxy (NOT litellm/spaces/postgres), so the
-# sandbox stays isolated from the prod services; it also has internet egress (Internal=false).
+# 4b) SERVE-BACKEND ACCESS TO THE SANDBOX — put the SANDBOX on the hermes SERVICE network ($SVC_NET)
+# that BOTH hermes containers are already on, rather than adding $SANDBOX to them as a third network.
+# HARD WARNING, kept because it cost an outage: NEVER attach a Traefik-routed container to the
+# sandbox's own network. Such a container has no `traefik.docker.network` label, so the extra network
+# leaves Traefik unable to pick the backend and it DROPS THE PUBLIC ROUTE (webui outage 2026-08-26).
+# That specific trap is moot now that hermes-serve is traefik.enable=false / tailnet-only, but the
+# $SVC_NET approach is kept anyway: one connect reaches both containers with no per-container change.
+# That network holds only the hermes containers + the coolify-proxy (NOT litellm/spaces/postgres), so
+# the sandbox stays isolated from the prod services; it also has internet egress (Internal=false).
 SVC_NET=${HERMES_SERVICE_NET:-zhvjhbo5752ovx1nl2rk9v30}
-Wc=${HERMES_WEBUI_CONTAINER:-hermes-webui-zhvjhbo5752ovx1nl2rk9v30}
+Sc=${HERMES_SERVE_CONTAINER:-hermes-serve-zhvjhbo5752ovx1nl2rk9v30}
 docker network connect "$SVC_NET" "$SANDBOX" 2>/dev/null || echo "  (sandbox already on service net)"
-# The webui runs agent turns as hermeswebui with .hermes at /home/hermeswebui, but the config's key
-# path is absolute /home/hermes/... — symlink so it resolves in the webui container too.
-docker exec "$Wc" sh -c '[ -e /home/hermes ] || ln -s /home/hermeswebui /home/hermes' 2>/dev/null \
-  && echo "  webui symlink ok" || echo "  webui symlink present/failed"
+# NO symlink step. hermes-serve runs the SAME image as the agent and mounts hermes-home at the SAME
+# absolute path (/home/hermes/.hermes), so config.yaml's absolute ssh_key path resolves as-is. (The
+# removed hermes-webui ran as `hermeswebui` off /home/hermeswebui and needed a /home/hermes symlink.)
 
 # 4c) REFRESH the sandbox host key in the known_hosts the terminal backend ACTUALLY uses. A RECREATE
 # regenerates the sandbox's ssh host key, so a pinned entry goes stale and strict host-key checking fails
 # with "REMOTE HOST IDENTIFICATION HAS CHANGED" (the terminal then silently falls back to LOCAL exec in
 # the agent container — the tool "works" but runs in the wrong place). The config `terminal:` block sets
-# ssh_key but NO known_hosts path, so ssh uses each runtime user's DEFAULT ~/.ssh/known_hosts: the agent
-# runs as `hermes` (HOME=/opt/data) and the webui as `hermeswebui`. Refresh BOTH (NOT the .hermes copy —
-# nothing reads that). Drop the stale entry + re-scan the fresh key.
+# ssh_key but NO known_hosts path, so ssh uses each runtime user's DEFAULT ~/.ssh/known_hosts. Both
+# containers run the same image as `hermes` with HOME=/opt/data, and /opt/data is an ANONYMOUS volume
+# (the image's own VOLUME) — a recreate gets a fresh empty one, so known_hosts is lost in BOTH. Refresh
+# both (NOT the .hermes copy — nothing reads that).
+# Drop the stale entry + re-scan the fresh key.
 docker exec -u hermes "$C" sh -c 'KH=/opt/data/.ssh/known_hosts; mkdir -p /opt/data/.ssh; \
   ssh-keygen -f "$KH" -R hermes-sandbox >/dev/null 2>&1; ssh-keyscan -H hermes-sandbox >> "$KH" 2>/dev/null' \
   && echo "  agent known_hosts refreshed" || echo "  agent known_hosts refresh FAILED"
-docker exec -u hermeswebui "$Wc" sh -c 'KH=/home/hermeswebui/.ssh/known_hosts; mkdir -p /home/hermeswebui/.ssh; \
+docker exec -u hermes "$Sc" sh -c 'KH=/opt/data/.ssh/known_hosts; mkdir -p /opt/data/.ssh; \
   ssh-keygen -f "$KH" -R hermes-sandbox >/dev/null 2>&1; ssh-keyscan -H hermes-sandbox >> "$KH" 2>/dev/null' \
-  && echo "  webui known_hosts refreshed" || echo "  webui known_hosts refresh FAILED"
+  && echo "  serve known_hosts refreshed" || echo "  serve known_hosts refresh FAILED"
 
 # 5) rclone -> R2 (the fleet asset store 'fleet-clients'). This is the sandbox's ONE real capability:
 # agents unzip a brand and `rclone copy` it to r2:fleet-clients/clients/<slug>/... The token is scoped
@@ -83,7 +90,8 @@ else
   echo "  (no $R2_CREDS_FILE on this host — skipping rclone/R2 provisioning; sandbox lacks R2 until provided)"
 fi
 
-echo "Webster networks: $(docker inspect "$C" --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}')"
+echo "hermes-agent networks: $(docker inspect "$C" --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}')"
+echo "hermes-serve networks: $(docker inspect "$Sc" --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}')"
 echo "Isolation self-check (all prod services should be unreachable):"
 docker exec "$SANDBOX" sh -c 'for t in litellm-v10up2yg1cwxo0k1ks9j2qro:4000; do timeout 3 curl -s -o /dev/null http://$t/ 2>/dev/null && echo "  REACHED $t (BAD)" || echo "  unreachable $t (good)"; done; echo -n "  prod secrets in sandbox: "; env | grep -icE "CLICKUP|EMAIL|ANTHROPIC|OPENAI|_KEY=|PASSWORD" || true'
 
@@ -92,7 +100,7 @@ docker exec "$SANDBOX" sh -c 'for t in litellm-v10up2yg1cwxo0k1ks9j2qro:4000; do
 #      known_hosts: sandbox host key -> $C:/home/hermes/.hermes/.ssh/known_hosts
 #   b) config.yaml: terminal:{backend:ssh, ssh_host:hermes-sandbox, ssh_user:sandbox, ssh_port:22,
 #      ssh_key:/home/hermes/.hermes/.ssh/sandbox_key} + add terminal,code_execution to
-#      platform_toolsets.{cli,cron,api_server}. Then `docker restart $C`.
+#      platform_toolsets.{cli,cron,api_server}  # (serve reads the same config). Then `docker restart $C`.
 #   c) specialists (2026-08-27): terminal + code_execution added to every platform_toolsets list in
 #      profiles/{writer,seo,producer,publisher,researcher}/config.yaml so they share this sandbox
 #      (bulk uploads / code exec). Same ssh backend + key resolve for worker turns. `docker restart $C`.

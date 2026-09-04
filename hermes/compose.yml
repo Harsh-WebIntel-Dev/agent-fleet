@@ -8,14 +8,9 @@ services:
   hermes-agent:
     # UPGRADED 2026-08-19 from v2026.7.7.2 (v0.18.2) — the pin is obsolete.
     #
-    # WHY IT WAS PINNED: hermes-agent v0.19.0+ refuses to be built as a wheel ("Building wheels or
-    # sdists for hermes-agent is not supported — use editable install"), and hermes-webui's
-    # docker_init.bash did `uv pip install "$_stage_src[all]"` — a wheel install — so every agent from
-    # v0.19.0 on crash-looped the webui. Upstream nesquena/hermes-webui#6558.
-    #
-    # WHY IT IS FIXED: that issue closed 2026-07-29T20:51:57Z, one minute after webui v0.52.106 was
-    # published. docker_init.bash now does `uv pip install -e "$_stage_src[all]"` — an EDITABLE
-    # install, exactly what the agent demands. Verified against master before upgrading.
+    # The old wheel-install pin (agent v0.19.0+ crash-looping hermes-webui, upstream
+    # nesquena/hermes-webui#6558) is now doubly dead: fixed upstream on 2026-07-29, and the webui
+    # itself was removed on 2026-09-04. Nothing here builds the agent as a wheel any more.
     #
     # WHY WE NEEDED THE UPGRADE: A2A. Hermes implements Agent2Agent v1.0 bidirectionally via a
     # bundled plugin (agent card at /.well-known/agent-card.json, JSON-RPC 2.0 at POST /, plus
@@ -41,8 +36,8 @@ services:
       # capped at 300 calls per 24h, versus REST's 100 per MINUTE. Agent ACTIONS (including
       # clickup_send_chat_message) still go through the MCP; only DETECTION lives here.
       - 'CLICKUP_API_TOKEN=${CLICKUP_API_TOKEN}'
-      # --- A2A inbound (PM -> Hermes via LiteLLM's A2A proxy). Internal-only: bound to the docker
-      # network, NO published port and traefik disabled, so it is never internet-facing. ---
+      # --- A2A inbound (PM -> Hermes via LiteLLM's A2A proxy). Published on the TAILNET IP only
+      # (see ports: below) and traefik disabled, so it is never internet-facing. ---
       - A2A_HOST=0.0.0.0            # widens off 127.0.0.1 ONLY because a token is set below
       - A2A_PORT=9900
       # Per-peer token: caller identity is 'fleet' (drives audit/trust), not an IP. The secret half
@@ -53,9 +48,15 @@ services:
     volumes:
       - 'hermes-home:/home/hermes/.hermes'
       - 'hermes-agent-src:/opt/hermes'
+    # A2A endpoint, tailnet-only (added 2026-09-04). Bound to the Tailscale IP so the public
+    # interface never sees it; the HTTPS front on :8447 is a host-level `tailscale serve` proxy in
+    # front of this, NOT a second binding. Do not move or unbind this — Hermes Desktop uses 18795.
+    ports:
+      - '100.115.104.5:18794:9900'
     labels:
-      # The AGENT stays internal. Only the webui is public — the gateway itself must never be
-      # directly reachable from the internet.
+      # NOTHING in this stack is internet-facing any more (the public webui was removed
+      # 2026-09-04). Both containers are traefik.enable=false and publish only on the
+      # tailnet IP 100.115.104.5, so every entry point requires being on the tailnet.
       - traefik.enable=false
     healthcheck:
       test: ['CMD-SHELL', 'test -d /home/hermes/.hermes || exit 1']
@@ -63,41 +64,64 @@ services:
       timeout: 5s
       retries: 5
 
-  hermes-webui:
-    # PINNED BY DIGEST = webui 0.52.247. The RELEASED 0.52.113 still wheel-builds the agent
-    # (`setuptools build_wheel`), which agent v0.19.0+ REFUSES — verified: it crash-looped here on
-    # 2026-08-19. The editable-install fix (`uv pip install -e` from a staged writable copy) is only
-    # in 0.52.247/master, not in any earlier release tag. Pinned by digest rather than `:latest` so a
-    # future recreate can't silently pull a newer, possibly-broken build onto this public service.
-    # NB: 0.52.247 is an exp/prerelease — the only webui that installs the A2A-capable agent today.
-    image: 'ghcr.io/nesquena/hermes-webui@sha256:d483b07b3c46d8e2258fdb2eee3c1de36172c1bb5c9955e3436a0fa05c99492b'
+  # Hermes SERVE — the headless backend the team's Hermes Desktop clients connect to.
+  #
+  # WHY THIS EXISTS (and why the webui could not do it): Hermes Desktop's remote mode probes
+  # GET /api/health, GET /api/status, then WS /api/ws. Those `/api/*` routes are served ONLY by
+  # `hermes serve` (the tui_gateway/FastAPI backend, default port 9119). They are NOT served by
+  # `gateway run` (messaging/cron/A2A only), by the A2A endpoint on :9900, or by the api_server
+  # platform on :8642 — which is why every earlier attempt to point Desktop at :18794 got a bare
+  # 404 in a 45s boot loop. `serve` also sets headless_backend=True, so it skips the web UI build
+  # (no npm at boot) and never serves the SPA.
+  #
+  # SAME image and SAME hermes-home volume as the agent, so this is the SAME Webster: one set of
+  # SOULs, profiles, sessions, memory and kanban — not a second agent. `serve` runs agent turns, so
+  # it needs the sandbox wiring too: re-run setup-sandbox.sh after every redeploy or
+  # terminal/code_execution silently fall back to running INSIDE this container.
+  hermes-serve:
+    image: 'nousresearch/hermes-agent:v2026.8.18'
+    command: 'serve --host 0.0.0.0 --port 9119'
     depends_on:
       - hermes-agent
     restart: unless-stopped
     environment:
-      - HERMES_WEBUI_HOST=0.0.0.0
-      - HERMES_WEBUI_PORT=8787
-      - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui
-      - WANTED_UID=1000
-      - WANTED_GID=1000
-      - 'HERMES_WEBUI_PASSWORD=${SERVICE_PASSWORD_HERMESWEBUI}'
+      - HERMES_HOME=/home/hermes/.hermes
+      - HERMES_UID=1000
+      - HERMES_GID=1000
+      - 'OPENAI_API_KEY=${OPENAI_API_KEY}'
+      # AUTH IS MANDATORY HERE, not optional. should_require_auth() treats ANY non-loopback bind —
+      # including this tailnet address — as public and engages the gate; once gated the static
+      # dashboard session token is rejected, so a real provider must be registered or the backend
+      # is unusable. These three register the bundled dashboard_auth/basic provider, which is what
+      # /api/status then advertises as auth_providers:["basic"] for Desktop to render a login form.
+      # Values are Coolify-managed secrets — never in source, never printed.
+      - 'HERMES_DASHBOARD_BASIC_AUTH_USERNAME=${SERVICE_USER_HERMESSERVE}'
+      - 'HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=${SERVICE_PASSWORD_HERMESSERVE}'
+      # HMAC key signing the stateless session tokens. Without it a random per-process key is used
+      # and every restart silently logs the whole team out.
+      - 'HERMES_DASHBOARD_BASIC_AUTH_SECRET=${SERVICE_PASSWORD_HERMESSERVESECRET}'
     volumes:
-      - 'hermes-home:/home/hermeswebui/.hermes'
-      - 'hermes-agent-src:/home/hermeswebui/.hermes/hermes-agent:ro'
+      # hermes-home is THE shared state — same Webster as the agent, not a copy.
+      - 'hermes-home:/home/hermes/.hermes'
+      # /opt/hermes is the baked install tree; stage2 explicitly never chowns or writes it, so
+      # sharing it with the agent is read-only in practice.
+      - 'hermes-agent-src:/opt/hermes'
       - 'hermes-workspace:/workspace'
-    # PUBLIC — client-facing by decision (2026-08-19). Reachable at wi-agent.widev.com.au.
-    #
-    # SECURITY POSTURE, stated plainly because it is the whole control surface:
-    # HERMES_WEBUI_PASSWORD is the ONLY thing between the internet and an agent holding this
-    # client's LiteLLM key and their conversation history. There is no IP allowlist, no SSO and no
-    # second factor. Anyone who discovers the hostname reaches the login page. The blast radius is
-    # bounded by the key being per-client and budget-capped ($50/30d), not by the network.
-    #
-    # The Tailscale bind below is kept as a separate admin path that does not depend on Traefik.
+    # TAILNET ONLY — bound to the Tailscale IP, so it is unreachable on the public interface
+    # (verified: 46.250.245.204:18795 -> refused). 18794 stays with A2A, untouched.
     ports:
-      - '100.115.104.5:18793:8787'
+      - '100.115.104.5:18795:9119'
+    labels:
+      # Never internet-facing. Also keeps this container off Traefik entirely, which is why giving
+      # it extra docker networks cannot repeat the 2026-08-26 route-drop outage.
+      - traefik.enable=false
     healthcheck:
-      test: ['CMD', 'curl', '-f', 'http://127.0.0.1:8787/health']
+      # /api/health is on the unauthenticated allowlist, so this passes with the auth gate ON.
+      test:
+        - CMD
+        - curl
+        - '-f'
+        - 'http://127.0.0.1:9119/api/health'
       interval: 30s
       timeout: 5s
       retries: 3

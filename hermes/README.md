@@ -15,7 +15,7 @@ a shared service.
 | | |
 |---|---|
 | agent image | `nousresearch/hermes-agent:v2026.8.18` (tag, not a sha digest — a digest tells a reviewer nothing about age) |
-| webui image | `ghcr.io/nesquena/hermes-webui:0.51.92` |
+| serve backend | no separate image — the **same** `nousresearch/hermes-agent` image run as `serve --host 0.0.0.0 --port 9119`. The separate `ghcr.io/nesquena/hermes-webui` container was **removed 2026-09-04** |
 | model | `flash` → `deepseek-v4-flash-0731`, **$0.08/$0.25 per M** |
 | key | LiteLLM virtual key `client-webintelligenz`, $50/30d |
 | config | `~/.hermes/config.yaml` — see `config.yaml.template` |
@@ -32,18 +32,29 @@ embeddings and the tier-blocked partner models. Hermes should only offer the con
 ## Exposure — read before changing
 
 `*.widev.com.au` is a **WILDCARD DNS record onto this box's public IP**. Any FQDN Coolify generates
-is internet-facing the moment the container starts, and this UI reaches an agent holding a client's
-key and their conversation history.
+is internet-facing the moment the container starts, and this runtime holds a client's LiteLLM key and
+their conversation history. Treat every new FQDN on this service as a public-exposure decision.
 
-**PUBLIC by decision (2026-08-19):** `https://wi-agent.widev.com.au` — 302 to the login page.
-`http://100.115.104.5:18793` is kept as an admin path that does not depend on Traefik.
+**Nothing here is internet-facing any more (2026-09-04).** The public browser webui was removed and
+replaced by the headless `hermes serve` backend that Hermes Desktop connects to. Both containers are
+`traefik.enable=false` and publish only on the **tailnet** IP `100.115.104.5`:
 
-`HERMES_WEBUI_PASSWORD` (31 chars) is the **only** control. No IP allowlist, no SSO, no second
-factor — anyone who finds the hostname reaches the login page. Blast radius is bounded by the key
-being per-client and budget-capped ($50/30d), not by the network.
+| port | container | what |
+|---|---|---|
+| `18795` | `hermes-serve` | Hermes Desktop backend (`/api/*`), username+password gate (provider `basic`) |
+| `18794` | `hermes-agent` | A2A endpoint (agent card + JSON-RPC), per-peer bearer token |
 
-Note the stored FQDN reads `https://wi-agent.widev.com.au:8787`; the `:8787` is Coolify's internal
-port notation, not a listening port. The public URL is the plain hostname — `:8787` returns 000.
+`https://wi-agent.widev.com.au` is **retired**: the Coolify FQDN and the webui's `SERVICE_*_HERMESWEBUI`
+env vars were deleted, so the hostname now falls through to Traefik's generic no-route **503**. The
+wildcard DNS record still resolves — it just routes to nothing. The old `18793` admin path is gone
+with the container.
+
+Access control therefore changed shape. Previously a single `HERMES_WEBUI_PASSWORD` was the *only*
+control and anyone who found the hostname reached the login page. Now **being on the tailnet is the
+first gate**, and the Desktop backend adds a username/password gate on top
+(`SERVICE_USER_HERMESSERVE` / `SERVICE_PASSWORD_HERMESSERVE` in Coolify env — never in this repo).
+Blast radius is still bounded by the per-client, budget-capped keys as well.
+See `CLAUDE.md` §2 "Connecting Hermes Desktop".
 
 ## Version pinning — do not "upgrade to latest" without reading this
 
@@ -73,6 +84,10 @@ only pinning the agent below 2026.7.20 does.
    every source-volume reset.**
 
 ## Verified working 2026-08-19
+
+> **Superseded snapshot.** Kept as the record of that day. The webui and its public URL no longer
+> exist — see "Exposure" above for what is verified now (2026-09-04).
+
 - agent healthy on v2026.7.7.2, webui healthy on 0.51.680
 - `https://wi-agent.widev.com.au` -> 302 (login), Tailscale 18793 -> 302
 - a real turn billed `client-webintelligenz` $0.000000 -> $0.001207 while the fleet and acme keys
