@@ -3,19 +3,27 @@ services:
   #
   # One Hermes per client. This is deliberate: the client's LiteLLM virtual key lives here, so a
   # conversation can only ever spend that client's budget, and their conversation history stays in
-  # their own volume. It is a different product from the fleet runtime (OpenClaw) — Hermes holds the
+  # their own volume. It is a different product from the fleet runtime — Hermes holds the
   # conversation, the fleet does the work.
+  #
+  # ─────────────────────────────────────────────────────────────────────────────────────────────
+  # THIS STACK HAS EXACTLY ONE SERVICE, AND MUST KEEP HAVING EXACTLY ONE.
+  #
+  # The image registers a SUPERVISED `gateway-default` s6 slot in EVERY container that mounts
+  # hermes-home, and auto-starts it (`hermes gateway run --replace`) whenever gateway_state.json
+  # records `desired_state: running` — and that file lives on the shared volume. So a second
+  # container is not "another surface", it is a SECOND GATEWAY that steals ownership of the
+  # fleet's messaging platforms: on 2026-09-04 an added `hermes serve` sidecar flipped
+  # gateway_state.json's writer_pid for `email`, `a2a` AND `api_server` to itself.
+  # There is NO env switch to opt a container out (the image's only opt-out is argv-based —
+  # `container_boot._is_dashboard_container` skips reconciliation when PID 1 argv starts with
+  # `dashboard`, which a `serve` sidecar does not match).
+  #
+  # Extra HTTP surfaces therefore go on THIS container, via the s6 slots the image already
+  # ships. See the HERMES_DASHBOARD block below. Superseded attempt: PR #4 (do not merge).
+  # ─────────────────────────────────────────────────────────────────────────────────────────────
   hermes-agent:
-    # UPGRADED 2026-08-19 from v2026.7.7.2 (v0.18.2) — the pin is obsolete.
-    #
-    # WHY IT WAS PINNED: hermes-agent v0.19.0+ refuses to be built as a wheel ("Building wheels or
-    # sdists for hermes-agent is not supported — use editable install"), and hermes-webui's
-    # docker_init.bash did `uv pip install "$_stage_src[all]"` — a wheel install — so every agent from
-    # v0.19.0 on crash-looped the webui. Upstream nesquena/hermes-webui#6558.
-    #
-    # WHY IT IS FIXED: that issue closed 2026-07-29T20:51:57Z, one minute after webui v0.52.106 was
-    # published. docker_init.bash now does `uv pip install -e "$_stage_src[all]"` — an EDITABLE
-    # install, exactly what the agent demands. Verified against master before upgrading.
+    # UPGRADED 2026-08-19 from v2026.7.7.2 (v0.18.2) — the old wheel-build pin is obsolete.
     #
     # WHY WE NEEDED THE UPGRADE: A2A. Hermes implements Agent2Agent v1.0 bidirectionally via a
     # bundled plugin (agent card at /.well-known/agent-card.json, JSON-RPC 2.0 at POST /, plus
@@ -41,8 +49,8 @@ services:
       # capped at 300 calls per 24h, versus REST's 100 per MINUTE. Agent ACTIONS (including
       # clickup_send_chat_message) still go through the MCP; only DETECTION lives here.
       - 'CLICKUP_API_TOKEN=${CLICKUP_API_TOKEN}'
-      # --- A2A inbound (PM -> Hermes via LiteLLM's A2A proxy). Internal-only: bound to the docker
-      # network, NO published port and traefik disabled, so it is never internet-facing. ---
+      # --- A2A inbound (PM -> Hermes). Tailnet-only: A2A_HOST widens the CONTAINER bind, and the
+      # published port below pins the HOST side to the Tailscale IP. ---
       - A2A_HOST=0.0.0.0            # widens off 127.0.0.1 ONLY because a token is set below
       - A2A_PORT=9900
       # Per-peer token: caller identity is 'fleet' (drives audit/trust), not an IP. The secret half
@@ -50,12 +58,47 @@ services:
       - 'A2A_PEER_TOKENS=fleet:${SERVICE_PASSWORD_A2ATOKEN}'
       - A2A_TRUSTED_PEERS=fleet     # explicit allowlist — an authed peer is refused unless named
       - A2A_AGENT_NAME=hermes-webintelligenz
+      # --- Hermes Desktop / browser backend, ON THIS CONTAINER (2026-09-04). ---
+      # Hermes Desktop's remote-connect readiness loop probes GET /api/health -> GET /api/status
+      # -> WS /api/ws. Those routes are served ONLY by the tui_gateway/FastAPI backend behind
+      # `hermes dashboard` / `hermes serve` (default port 9119) — NOT by `hermes gateway run`,
+      # NOT by the A2A endpoint on 9900, and NOT by the api_server platform on 8642. Pointing
+      # Desktop at any of those returns a bare 404 in a ~45s boot loop that looks like a network
+      # fault but is not.
+      #
+      # `dashboard` and `serve` are ONE backend (cmd_dashboard -> web_server.start_server);
+      # `serve` only adds headless_backend=True to skip the SPA build. So the image's supervised
+      # `dashboard` slot serves exactly the /api/* contract Desktop needs — and, unlike a `serve`
+      # sidecar, it runs INSIDE this container, adding no second gateway. Enabling it starts no
+      # `gateway run`: the slot's run script execs `hermes dashboard` and nothing else, and
+      # start_server only forks a gateway/cron ticker under HERMES_DESKTOP=1, which is unset here.
+      - HERMES_DASHBOARD=1
+      # 0.0.0.0 is the CONTAINER-side bind; the published port below pins the HOST side to the
+      # Tailscale IP, so this stays tailnet-only despite the wildcard bind (same shape as A2A).
+      - HERMES_DASHBOARD_HOST=0.0.0.0
+      - HERMES_DASHBOARD_PORT=9119
+      # Auth is MANDATORY and fail-closed. should_require_auth() treats ANY non-loopback bind —
+      # tailnet and RFC1918 included — as public and engages the gate; start_server then REFUSES
+      # to boot unless a real DashboardAuthProvider is registered. HERMES_DASHBOARD_INSECURE has
+      # been a no-op since the June 2026 hardening, and the static session token is rejected once
+      # gated, so the bundled dashboard_auth/basic provider is the minimum viable config.
+      # Values are Coolify-managed env vars — never literals in source.
+      - 'HERMES_DASHBOARD_BASIC_AUTH_USERNAME=${HERMES_DASHBOARD_BASIC_AUTH_USERNAME}'
+      - 'HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD}'
+      # HMAC signing key for the session cookie. WITHOUT it the provider falls back to a random
+      # per-process key, so every restart logs everyone out.
+      - 'HERMES_DASHBOARD_BASIC_AUTH_SECRET=${HERMES_DASHBOARD_BASIC_AUTH_SECRET}'
     volumes:
       - 'hermes-home:/home/hermes/.hermes'
       - 'hermes-agent-src:/opt/hermes'
+    # Both published ports are HostIp-scoped to the Tailscale address, so neither is reachable on
+    # the public IP even though Traefik is off. Verify after any change: the public IP must refuse.
+    ports:
+      - '100.115.104.5:18794:9900'   # A2A  (agent card + JSON-RPC, bearer-authed)
+      - '100.115.104.5:18795:9119'   # Hermes Desktop backend / dashboard SPA (basic-authed)
     labels:
-      # The AGENT stays internal. Only the webui is public — the gateway itself must never be
-      # directly reachable from the internet.
+      # The agent stays off Traefik entirely — the gateway must never be reachable from the
+      # internet. Reachability is the two tailnet-scoped publishes above, nothing else.
       - traefik.enable=false
     healthcheck:
       test: ['CMD-SHELL', 'test -d /home/hermes/.hermes || exit 1']
@@ -63,41 +106,10 @@ services:
       timeout: 5s
       retries: 5
 
-  hermes-webui:
-    # PINNED BY DIGEST = webui 0.52.247. The RELEASED 0.52.113 still wheel-builds the agent
-    # (`setuptools build_wheel`), which agent v0.19.0+ REFUSES — verified: it crash-looped here on
-    # 2026-08-19. The editable-install fix (`uv pip install -e` from a staged writable copy) is only
-    # in 0.52.247/master, not in any earlier release tag. Pinned by digest rather than `:latest` so a
-    # future recreate can't silently pull a newer, possibly-broken build onto this public service.
-    # NB: 0.52.247 is an exp/prerelease — the only webui that installs the A2A-capable agent today.
-    image: 'ghcr.io/nesquena/hermes-webui@sha256:d483b07b3c46d8e2258fdb2eee3c1de36172c1bb5c9955e3436a0fa05c99492b'
-    depends_on:
-      - hermes-agent
-    restart: unless-stopped
-    environment:
-      - HERMES_WEBUI_HOST=0.0.0.0
-      - HERMES_WEBUI_PORT=8787
-      - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui
-      - WANTED_UID=1000
-      - WANTED_GID=1000
-      - 'HERMES_WEBUI_PASSWORD=${SERVICE_PASSWORD_HERMESWEBUI}'
-    volumes:
-      - 'hermes-home:/home/hermeswebui/.hermes'
-      - 'hermes-agent-src:/home/hermeswebui/.hermes/hermes-agent:ro'
-      - 'hermes-workspace:/workspace'
-    # PUBLIC — client-facing by decision (2026-08-19). Reachable at wi-agent.widev.com.au.
-    #
-    # SECURITY POSTURE, stated plainly because it is the whole control surface:
-    # HERMES_WEBUI_PASSWORD is the ONLY thing between the internet and an agent holding this
-    # client's LiteLLM key and their conversation history. There is no IP allowlist, no SSO and no
-    # second factor. Anyone who discovers the hostname reaches the login page. The blast radius is
-    # bounded by the key being per-client and budget-capped ($50/30d), not by the network.
-    #
-    # The Tailscale bind below is kept as a separate admin path that does not depend on Traefik.
-    ports:
-      - '100.115.104.5:18793:8787'
-    healthcheck:
-      test: ['CMD', 'curl', '-f', 'http://127.0.0.1:8787/health']
-      interval: 30s
-      timeout: 5s
-      retries: 3
+# NOTE — `hermes-webui` (ghcr.io/nesquena/hermes-webui) used to be a second service here, public at
+# wi-agent.widev.com.au behind HERMES_WEBUI_PASSWORD. It was removed from the deployed stack on
+# 2026-09-04. Do NOT restore it as a compose service: it mounts hermes-home, which makes it exactly
+# the second-gateway hazard described at the top of this file. The `HERMES_DASHBOARD` slot above
+# now serves the same browser SPA from inside the agent container, tailnet-only instead of public.
+# Consequence to be aware of: wi-agent.widev.com.au currently returns 503 (no backend). Restoring a
+# PUBLIC browser UI is an open decision — see CLAUDE.md §16.
