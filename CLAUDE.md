@@ -60,6 +60,14 @@ mechanism*, never the individual task.
   **drift** — always read the live file first and keep a dated `.bak-*`.
 - **Webui (public):** `https://wi-agent.widev.com.au` — password-only, internet-facing; blast radius
   bounded by per-client budget-capped keys.
+- **Gateway A2A (tailnet-only):** `http://100.115.104.5:18794/` (MagicDNS
+  `http://web-intelligenz-contabo-server.taila837cf.ts.net:18794/`) — the agent's A2A JSON-RPC
+  endpoint (container port `9900`), published on the **Tailscale IP only**, mirroring the webui's
+  `100.115.104.5:18793:8787`. `traefik.enable=false` and the binding is HostIp-scoped, so it is
+  **not** reachable on the public IP or on loopback. Bearer auth: peer **`fleet`**, token in the
+  Coolify env var `SERVICE_PASSWORD_A2ATOKEN`. This is what an external client (e.g. Hermes Desktop)
+  connects to — **not** the webui. Added 2026-09-04 via the Coolify MCP (the compose is Coolify-owned;
+  see §13).
 
 ---
 
