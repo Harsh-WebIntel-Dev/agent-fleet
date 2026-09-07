@@ -185,7 +185,7 @@ actually happened.
 | `mcp-memory/` | Vectorised fleet memory (Postgres+pgvector, per-client RLS, per-agent) | current |
 | `mcp-postiz-extras/` | Postiz mgmt the built-in MCP lacks (`postiz_list/delete/set_status/edit`) | current |
 | `mcp-lnkbio/` | Lnk.Bio link-in-bio (rolling top-5), WI-only | current |
-| `mcp-mailchimp/` | Mailchimp newsletter drafts (draft-only, WI-only) — **blocked on Infisical key** | current |
+| `mcp-mailchimp/` | Mailchimp newsletter drafts (draft-only, WI-only). Key resolved 2026-09-07; ⚠️ latency outlier — see §7 + §16 | current |
 | `mcp-higgsfield/` | Higgsfield image/video generation | current |
 | `mcp-wordpress/` | Custom `wp-json` WordPress sidecar (7 tools) | current |
 | `mcp-spaces/` | R2 / DO Spaces asset store (ingest/presign/read/write) | current |
@@ -285,7 +285,7 @@ All agents reach tools through the litellm **aggregated `/mcp/`** endpoint (Herm
 | **postiz** | self-hosted `postiz.widev.com.au` | `fleet_tools` | `integrationSchedulePostTool`, `integrationList`, `groupList`, `integrationSchema`, `triggerTool`, `generateImage/VideoTool`, `uploadFromUrlTool` | social + Google Business Profile; 10-tool allow-list (excludes `ask_postiz`) |
 | **postiz_extras** | sidecar `mcp-postiz-extras` | `fleet_tools` | `postiz_list`, `postiz_delete`, `postiz_set_status`, `postiz_edit` | fills gaps the built-in Postiz MCP lacks; delete-500 = success; 15-min past-slot guard on edit |
 | **lnkbio** | sidecar `mcp-lnkbio` | **`wi_tools`** | `lnkbio_list`, `lnkbio_set_link` | **WI-only**; rolling top-5 (adds a link, drops the oldest) |
-| **mailchimp** | sidecar `mcp-mailchimp` (node) | **`wi_tools`** | 17 **draft-only**: `create_campaign`, `update_campaign`, `set_campaign_content`, `send_test_email`, `list_audiences/templates/campaigns`, … | send/schedule/delete withheld at the gateway; **blocked on the Infisical key** |
+| **mailchimp** | sidecar `mcp-mailchimp` (node) | **`wi_tools`** | 18 **draft-only**: `create_campaign`, `update_campaign`, `set_campaign_content`, `send_test_email`, `list_audiences/templates/campaigns`, … | send/schedule/delete withheld at the gateway. Key **resolved 2026-09-07**. ⚠️ The only sidecar that is a **stdio child behind a `supergateway` shim**, so every `tools/list` re-initialises a child process — it is the fleet's `tools/list` latency outlier (see "Tool mounting is a race" below) |
 | **wordpress** | sidecar `mcp-wordpress` | `fleet_tools` | `wp_create_draft`, `wp_update_post`, `wp_get_post`, `wp_publish`, `wp_upload_media`, `wp_list_categories`, `account_status` | content-bot role; **WI site only** (not per-client yet) |
 | **higgsfield** | sidecar `mcp-higgsfield` | `fleet_tools` | `create_image_job`, `get_image_job`, `list_image_models`, `verify_url`, `account_status` | async: `create_image_job` → poll `get_image_job` |
 | **spaces** | sidecar `mcp-spaces` → **R2** | `fleet_tools` | `spaces_list`, `spaces_read`, `spaces_write`, `spaces_ingest_url`, `spaces_presign`, `spaces_delete` | asset store, bucket `fleet-clients` (see §6 Cloudflare) |
@@ -294,6 +294,45 @@ All agents reach tools through the litellm **aggregated `/mcp/`** endpoint (Herm
 **Not in the registry:** Firecrawl is a Hermes **plugin** (`web/firecrawl`), not a litellm MCP;
 `mcp-a2a` (`ask_pm`/`create_pm_task`/`notify_client_hermes`) and `mcp-social-extras` are
 **OpenClaw-era / legacy** (superseded by `postiz_extras` + `lnkbio`; the a2a Coolify service is exited).
+
+### ⚠️ Tool mounting is a RACE, and losing it is silent
+
+A kanban worker is a **fresh subprocess** — `hermes -p <profile> --cli --toolsets <…,pm_comms,…>
+chat -q "work kanban task <id>"` (`hermes_cli/kanban_db.py:_default_spawn`). It re-discovers the
+whole `pm_comms` toolset **live, from scratch, on every dispatch**. Three bounds decide whether it
+gets its 132 tools:
+
+| Bound | Value | Where | What happens when it's exceeded |
+|---|---|---|---|
+| LiteLLM per-upstream `tools/list` | **30 s** | `MCP_TOOL_LISTING_TIMEOUT` (env `LITELLM_MCP_TOOL_LISTING_TIMEOUT`) | that upstream is **silently dropped** from the aggregate — the specialist gets a **partial** manifest and cannot tell |
+| Hermes agent-build wait | **15 s** | `mcp_single_query_discovery_timeout` (`hermes_cli/config_defaults.py:594`) | the agent snapshots its tool registry **without MCP tools** and runs the whole card that way |
+| Hermes per-server connect | **60 s** | `mcp_servers.<name>.connect_timeout` (default `_DEFAULT_CONNECT_TIMEOUT`) | discovery is cancelled → `registered 0 tool(s) from 0 server(s) (1 failed)` |
+
+The 15 s bound is the dangerous one. In `chat -q` (single-query) mode **there is no between-turns
+late-binding refresh** — the agent snapshots `get_tool_definitions()` once and never re-reads it
+(`hermes_cli/mcp_startup.py:227-265`, `cli.py:20158`). A worker that loses the race runs tool-less
+for its entire dispatch and then blocks with a "my tools aren't mounted" message.
+
+**The schema cache does NOT save you.** `cache/mcp_schema_cache.json` is only consulted for servers
+marked `lazy: true` (`tools/mcp_tool.py:7250-7274`); `pm_comms` is not. Its entries also carry
+`ttl_ms: 0`, which makes `get_cached_entry` return `None` unconditionally
+(`tools/mcp_schema_cache.py:80-87`). So a fresh, correctly-sized cache file proves nothing about
+whether a dispatch got its tools.
+
+**How to tell what a dispatch actually got** — per-profile log, not the card log:
+
+```bash
+grep -E "MCP: registered|Failed to connect to MCP|tool_search activated" \
+  /home/hermes/.hermes/profiles/<profile>/logs/agent.log | tail
+```
+
+`MCP: registered 132 tool(s) from 1 server(s)` = healthy. `114` = mailchimp dropped.
+`0 tool(s) … (1 failed)` = the worker ran blind. `tool_search activated … N deferred` is the count
+that actually reached the model, and it must appear **after** the registration line.
+
+Measured discovery latency (session-ID → registration): **2.6–7.7 s** across Aug 24–31 (107–113
+tools, no mailchimp) → **6–50 s** on 2026-09-07 (132 tools, mailchimp live). Adding one slow
+upstream moved the fleet from "always wins the race" to "sometimes loses it".
 
 ### Sidecar build pattern
 
@@ -346,11 +385,16 @@ The in-process scheduler runs in `hermes-agent`; jobs in `cron/jobs.json`; manag
 | `marketing-task-sweep` | `12b1e0f820e9` | 15m | **MCP-only** (no gate): Webster lists his actionable ClickUp tasks himself and composes/reviews. |
 | `clickup-chat-intake` | `f3d04e2607f5` | 5m | `monitor_chat.py` gate → reads the changed channel; DM = answer all, group = only if @tagged. |
 | `semrush-blog-global-feed` | `21cb02f87693` | 07:00 | Ingest SEMrush blog → global memory + Spaces `clients/global/semrush-feed.md`. |
-| `review-notify` | `415989b00956` | 15m | Emails reviewers "ready for review". **Currently failing** ("email has no gateway credentials") — email platform is enabled but the cron's `deliver: email` SMTP creds are not loaded; verify before relying on it. |
+| `review-notify` | `415989b00956` | 15m | **Healthy.** `monitor_review.py` gate → `Deliver: email:` to all four reviewers (paulthewlis / harry / nipuni / harsh @webintelligenz.com). Every run since **2026-09-02 01:49 UTC** is `ok / completed`; the last `no gateway credentials` block was that same timestamp, which is also the job's `Changed:` stamp. |
 
 **Monitor-gate pattern:** a job may name a `monitor_script`/`monitor_url`; Hermes runs it each tick and
 wakes the LLM only when its output hash **changes**. The task-sweep deliberately has **no** gate; the
 chat intake keeps its gate because it does real channel-routing, not just cost-gating.
+
+**`[SILENT]` is not a failure.** `monitor output unchanged — suppressing agent run` followed by
+`agent returned [SILENT] — skipping delivery` is the gate doing its job: nothing is sitting in
+`in review`, so there is nothing to email. A missing review email means **no task reached
+`in review`** — walk the kanban chain back to the stage that stalled, don't debug the cron.
 
 **⚠️ Cron traps:** (a) a killed/`timeout`-wrapped `hermes cron run` can baseline-without-processing and
 stick "no change" — never wrap it in `timeout`. (b) A cron's first tick fired inside the webui session
@@ -421,6 +465,14 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
 
 - LiteLLM `POST /v1/mcp/server` is destructive (nulls fields); no PATCH → edit config + DELETE + restart.
 - Two Hermes processes cache MCP schemas independently → clear both caches + restart both for tool changes.
+- **A specialist can dispatch with ZERO (or a partial) MCP toolset and nobody is told.** Every kanban
+  worker re-discovers `pm_comms` live; one slow upstream pushes the aggregated `tools/list` past
+  Hermes' 15 s agent-build bound and the worker runs blind for the whole card (§7 "Tool mounting is a
+  race"). A populated `mcp_schema_cache.json` is **not** evidence the dispatch got its tools — that
+  cache is inert for `pm_comms`. Check `profiles/<p>/logs/agent.log` for `MCP: registered N tool(s)`.
+- **A "missing social posts / missing review email" report is usually one upstream stage blocked**,
+  not two bugs. `producer` blocked → children never become eligible → nothing reaches `in review` →
+  `review-notify` correctly emits `[SILENT]`. Read the board, not the symptoms.
 - Sandbox network link is not Coolify-managed → re-run `setup-sandbox.sh` after a redeploy.
 - Never wrap `hermes cron run` in `timeout` (baselines-without-processing → stuck "no change"); a
   cron's first tick inside its creating webui session logs a **false** `failed`.
@@ -435,12 +487,26 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
 
 ## 16. Open items
 
-- **Mailchimp key** — MCP built/wired/scoped (draft-only, WI-only) but **blocked** on staging
-  `MAILCHIMP_API_KEY` into Infisical `/shared` (needs an admin token).
-- **review-notify email delivery** — failing ("no gateway credentials"); verify the email platform's
-  SMTP creds are loaded.
+- **`mcp-mailchimp` destabilises the aggregated `/mcp/` endpoint** *(open, 2026-09-07)*. The key is
+  resolved and the sidecar works, but it is a stdio child behind a `supergateway` shim and is the
+  fleet's only upstream that ever hits LiteLLM's 30 s `tools/list` timeout (6 log events on
+  2026-09-07, `RestartCount=6` vs `0` for every other sidecar). Each event degrades a specialist
+  dispatch — twice to a partial 114-tool manifest, once (14:10) to **zero tools**, which blocked
+  `t_d44a78e0` and stalled a whole blog chain. Three candidate fixes, all needing a redeploy of the
+  named service: (a) `LITELLM_MCP_TOOL_LISTING_TIMEOUT=8` on `fleet-core-litellm` so a hung upstream
+  degrades fast instead of poisoning the aggregate; (b) move mailchimp to its own access group so
+  only Webster/publisher keys pay its latency; (c) replace the supergateway stdio shim with a native
+  streamable-HTTP server. Zero-downtime mitigation on the Hermes side: raise
+  `mcp_single_query_discovery_timeout` + `mcp_servers.pm_comms.connect_timeout` in each specialist
+  profile's `config.yaml` (workers are fresh processes — takes effect next dispatch, no restart).
+- **No fail-loud when a worker starts tool-less.** Hermes has no `mcp_required`/`mcp_strict` knob
+  (verified by grep across `/opt/hermes`), so a specialist with zero MCP tools improvises for the
+  full dispatch and only then blocks. Cheapest available guard: a turn-1 rule in all five specialist
+  SOULs — "if `mcp__pm_comms__*` is absent from your toolset, block immediately, do not improvise".
 - **Per-client WordPress** — client keys can't publish to their own sites yet; client WP publishing is
   held until wired.
+- ~~**Mailchimp key**~~ — resolved 2026-09-07; `MAILCHIMP_API_KEY` is staged in Infisical `/shared`.
+- ~~**review-notify email delivery**~~ — resolved 2026-09-02; all runs `ok / completed` since (§9).
 
 ---
 
