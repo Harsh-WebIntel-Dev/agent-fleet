@@ -374,6 +374,69 @@ apply-toolset-guard.sh` inserts a turn-1 rule into all five specialist SOULs: no
 → block immediately with a `TOOLSET-NOT-MOUNTED` marker, and explicitly **do not** go hunting for
 credentials in the sandbox (the mistake `t_d44a78e0` made). SOULs are read per-turn — no restart.
 
+### ⚠️ THREE vendor errors disable ALL 132 tools for 60 s — and "no data found" counts
+
+A **second, independent** way a specialist loses its tools, this one **mid-run**. Every fleet tool
+lives behind the single aggregate MCP server `pm_comms`, and Hermes runs a circuit breaker **per
+server**:
+
+```python
+result = _call_once()
+try:
+    parsed = json.loads(result)
+    if "error" in parsed:
+        _bump_server_error(server_name)      # ← ANY tool-level error counts
+    else:
+        _reset_server_error(server_name)
+except (json.JSONDecodeError, TypeError):
+    _reset_server_error(server_name)
+# tools/mcp_tool.py:5913-5923 · _CIRCUIT_BREAKER_THRESHOLD = 3 · COOLDOWN = 60.0s (:4270-4271)
+```
+
+Three *consecutive* errors from **any one vendor** open the breaker on `pm_comms`, and then **every**
+tool from **all ten upstreams** short-circuits for 60 s with:
+
+> `MCP server 'pm_comms' is unreachable after 3 consecutive failures. Auto-retry available in ~8s.`
+
+**The tools are fine. The transport is fine. Nothing is unreachable.** Note the two layers disagree:
+the inner call path deliberately does *not* count a vendor `isError`, and even calls
+`_mark_session_proven()` — *"the RPC round-trip completed — the session is demonstrably healthy at
+the transport level (even if the tool itself returned isError)"* (`:5798-5817`). The outer handler
+then re-parses that same result string, sees `{"error": …}`, and bumps anyway. The transport/vendor
+distinction is flattened into JSON and lost.
+
+**Worst part: a legitimate empty result counts as a failure.** Measured on 2026-09-07, the three
+errors immediately before one trip were:
+
+```
+18:25:25  ERROR 50 :: NOTHING FOUND - No data found for this request
+18:25:27  ERROR 50 :: NOTHING FOUND - No data found for this request
+18:25:29  ERROR 50 :: NOTHING FOUND - No data found for this request
+18:26:20  MCP server 'pm_comms' is unreachable after 3 consecutive failures
+```
+
+That is SEMrush **correctly answering** that a low-volume keyword has no data. So the `seo` profile
+takes the whole fleet's tool surface down *as a direct consequence of doing its job properly* —
+testing keyword variants, most of which are legitimately empty. **All 11 breaker trips on
+2026-09-07 were `seo`**; zero on producer, publisher, writer or researcher. Genuine nginx `503`s
+trip it identically (17:08:53/55/57 → trip 17:09:24).
+
+**This is NOT caused by the mailchimp crash** — worth stating because it was proposed and the data
+rules it out. Mailchimp's fatal exits at 14:10:28, 14:20:30, 14:33:11 and 14:55:22 produced **zero**
+breaker trips, and the 17:09:24 trip *precedes* the 17:10:24 crash by a minute. Every trip is
+preceded by exactly three vendor tool errors. Two separate defects, same symptom.
+
+**So: a breaker trip presents as "vendor X is down".** Always check `pm_comms` health before
+believing a specialist's vendor diagnosis. One root cause produced three different wrong answers on
+2026-09-07 — *"Higgsfield, ClickUp and Spaces MCP tools are not mounted"* (producer), *"Semrush +
+ClickUp MCP absent"* and *"Semrush API backend is 503ing"* (seo) — and each sent a human to the
+wrong layer.
+
+```bash
+grep -h "unreachable after 3 consecutive failures" \
+  /home/hermes/.hermes/profiles/*/logs/agent.log | tail
+```
+
 ### Sidecar build pattern
 
 Each `mcp-*/` is a self-hosted MCP server, its own Coolify service:
@@ -513,6 +576,11 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
 - **A "missing social posts / missing review email" report is usually one upstream stage blocked**,
   not two bugs. `producer` blocked → children never become eligible → nothing reaches `in review` →
   `review-notify` correctly emits `[SILENT]`. Read the board, not the symptoms.
+- **NEVER trust a specialist's "vendor X is down" diagnosis without checking `pm_comms` first.**
+  Three consecutive tool-level errors from ANY one vendor open a 60 s circuit breaker on the whole
+  `pm_comms` aggregate, so all 132 tools from all 10 upstreams vanish at once and the agent blames
+  whichever vendor it happened to be calling. A legitimate `ERROR 50 :: NOTHING FOUND` counts as a
+  failure, so `seo` trips it routinely just by testing low-volume keywords (§7).
 - Sandbox network link is not Coolify-managed → re-run `setup-sandbox.sh` after a redeploy.
 - Never wrap `hermes cron run` in `timeout` (baselines-without-processing → stuck "no change"); a
   cron's first tick inside its creating webui session logs a **false** `failed`.
@@ -539,6 +607,29 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
   streamable-HTTP server. Zero-downtime mitigation on the Hermes side: raise
   `mcp_single_query_discovery_timeout` + `mcp_servers.pm_comms.connect_timeout` in each specialist
   profile's `config.yaml` (workers are fresh processes — takes effect next dispatch, no restart).
+- **`pm_comms` circuit breaker counts vendor errors as transport failures** *(open, 2026-09-07 — the
+  highest-impact item on this list)*. Three consecutive tool-level errors from one upstream disable
+  all 132 tools from all 10 upstreams for 60 s, and a legitimate `ERROR 50 :: NOTHING FOUND` counts
+  (§7). 11 trips on 2026-09-07, all `seo`. Options: (a) make `_bump_server_error` fire only on
+  transport faults, not on a vendor `isError` — the inner call path already draws that distinction
+  and calls `_mark_session_proven()`, so the fix is to stop the outer handler re-counting it
+  (`tools/mcp_tool.py:5913-5923`); (b) register the upstreams as separate Hermes MCP servers instead
+  of one `pm_comms` aggregate, so a breaker scopes to one vendor; (c) raise the threshold — weakest,
+  it only delays the trip. (a) is a patch to the vendored nousresearch image, so (b) is likely the
+  fleet-side answer. **Until fixed, one flaky vendor can blank the fleet's whole tool surface.**
+- **Kanban workspace path does not exist in the sandbox** *(open, 2026-09-07)*. `_default_spawn` pins
+  `TERMINAL_CWD` to the agent-side workspace (`/home/hermes/.hermes/kanban/workspaces/<id>`), but
+  `terminal.backend: ssh` executes in the **`hermes-sandbox` container**, which has no such path —
+  so every `cd` into it fails with `exit 126`. The directory really does exist on the agent side, so
+  this is a container-boundary mismatch, not a missing workspace. **29 distinct cards and 60+
+  occurrences** in the profile logs going back to August; every specialist burns turns rediscovering
+  it. Fix by either mounting/creating the workspace inside the sandbox or not pinning `TERMINAL_CWD`
+  when the terminal backend is `ssh`.
+- **`tirith` false positive on regex-escaped dots** *(open, 2026-09-07)*. An agent writing
+  `webintelligenz\.com` in a regex gets the shell guard blocking on
+  `[HIGH] Invalid characters in hostname: Hostname 'webintelligenz\.com' contains characters that
+  are never valid in DNS names`. The guard is reading a regex literal as a hostname. Low frequency
+  (1 occurrence) but it costs a turn and teaches the agent to distrust its own tooling.
 - **Cut the mailchimp upstream tool surface at the SOURCE, not at the gateway** *(open, 2026-09-07 —
   proposed, not implemented)*. This is the real cost driver behind the tool-mount race; widening
   timeouts treats the symptom. The upstream `mailchimp-mcp==0.6.0` advertises **115 tools**; the
