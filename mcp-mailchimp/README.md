@@ -46,21 +46,51 @@ That single ambiguous line caused a full misdiagnosis on 2026-09-07 — the side
 "never wired to Infisical" when it had been wired correctly since 2026-09-01 and the secret simply
 had not been staged yet. `infisical_probe.py` exists purely to keep those cases apart.
 
-## Known issue — supergateway crash-restarts
-
-Between 2026-09-01 and 2026-09-07 the container restarted **28 times**, once per crash:
+## The crash — diagnosed and guarded (2026-09-07)
 
 ```
 Error: No connection established for request ID: 0
+    at WebStandardStreamableHTTPServerTransport.send (…/webStandardStreamableHttp.js:917:27)
+    at file:///usr/local/lib/node_modules/supergateway/dist/gateways/stdioToStatelessStreamableHttp.js:120:39
+Node.js v20.20.2
 ```
 
-Thrown uncaught from supergateway's stateless streamable-HTTP bridge when it tries to write a child
-response to an HTTP request whose connection has already gone (27 of 28 were request id `0`, the
-`initialize` handshake). Node exits, Docker's `unless-stopped` policy restarts it. This is
-**unrelated to the API key** — it happened equally before and after the key was staged, and it will
-recur. `restart: unless-stopped` masks it; the symptom is a climbing `RestartCount` plus a brief
-window where LiteLLM tool calls fail. Not yet fixed upstream-side; supergateway is now pinned to
-`3.4.3` so a rebuild does not silently change this behaviour in either direction.
+Thrown when supergateway writes a child response to an HTTP request whose connection has already
+gone — overwhelmingly request id `0`, the `initialize` handshake. Between 2026-09-01 and 2026-09-07
+it killed the container **36 times** (28 + 8 more on 09-07 alone).
+
+**Why the existing guard doesn't catch it.** supergateway wraps the call:
+
+```js
+try { transport.send(jsonMsg) } catch (e) { logger.error(`Failed to send…`, e) }
+```
+
+but `transport.send()` is **`async`**. The SDK's throw becomes a *rejected promise*, the synchronous
+`catch` never sees it, and Node 20 treats an unhandled rejection as fatal — hence the bare
+`Node.js v20.20.2` line that ends every one of these logs.
+
+**The guard.** `ENV NODE_OPTIONS="--unhandled-rejections=warn"` in the Dockerfile. A late write to a
+dead socket is a no-op; it should be a logged warning, not a container death. Verified in the image:
+
+```
+$ NODE_OPTIONS=--unhandled-rejections=warn node -e 'Promise.reject(new Error(1)); …'
+UnhandledPromiseRejectionWarning: …          # and the process keeps running
+$ node -e 'Promise.reject(new Error(2)); …'  # default
+Node.js v20.20.2                              # dead
+```
+
+Remove the guard once supergateway awaits or `.catch()`es `transport.send()`. `--stateful` was
+considered as an alternative (it keeps a session's stream alive so the response has somewhere to go)
+but it changes transport semantics for every client; the guard is the smaller change and addresses
+the fatality directly.
+
+**Why it mattered so much.** This sidecar is the fleet's `tools/list` outlier: the upstream exposes
+**115 tools** (the gateway allow-lists 18 of them), so a full listing costs **7–11 s** against
+**0.13–0.39 s** for every other sidecar. When a crash lands mid-handshake, LiteLLM's 30 s
+`MCP_TOOL_LISTING_TIMEOUT` expires, mailchimp drops out of the aggregate, and the aggregated
+`/mcp/` call blows past Hermes' 15 s tool-mount bound — so a *specialist* dispatch silently starts
+with **zero** MCP tools. That is what blocked `t_d44a78e0` at 14:10 on 2026-09-07. See CLAUDE.md §7
+"Tool mounting is a RACE".
 
 ## Deploying a change
 
