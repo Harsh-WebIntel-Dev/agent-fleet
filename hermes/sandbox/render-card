@@ -54,14 +54,20 @@ selfhosted = {m.strip("'\" ").lower()
               for m in re.findall(r"@font-face[^}]*?font-family\s*:\s*([^;]+);", html, re.I | re.S)}
 has_remote_css = bool(re.search(r"<link[^>]+href=[\"']https?://[^\"']+", html, re.I))
 
+_fc_cache = {}
+
+
 def resolves_locally(fam):
     """fc-match always answers; it's only a real hit if the family it names is the one we asked for."""
-    try:
-        out = subprocess.run(["fc-match", "-f", "%{family}", fam],
-                             capture_output=True, text=True, timeout=10).stdout
-    except Exception:
-        return False
-    return fam.lower() in [f.strip().lower() for f in out.split(",")]
+    key = fam.lower()
+    if key not in _fc_cache:
+        try:
+            out = subprocess.run(["fc-match", "-f", "%{family}", fam],
+                                 capture_output=True, text=True, timeout=10).stdout
+            _fc_cache[key] = key in [f.strip().lower() for f in out.split(",")]
+        except Exception:
+            _fc_cache[key] = False
+    return _fc_cache[key]
 
 missing = [f for f in declared
            if f.lower() not in selfhosted

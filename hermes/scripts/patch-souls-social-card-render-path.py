@@ -48,11 +48,13 @@ cropping a Higgsfield plate to a platform aspect ratio does **not** make it a ca
 out of `render-card` as a **PNG**; if you are about to hand over `social/<slot>.jpg`, stop."""
 
 # --- webster: the rule that was missing entirely -----------------------------------------------------
-WEB_ANCHOR = "**Voice:**"
-WEB_RULE = """**A social card is RENDERED from the template, never AI-generated.** A social feed card
-(Facebook / Instagram / LinkedIn / Google Business Profile) is the one artefact that must carry legible
-type — headline, kicker, logo, brand rule. The producer renders it with `render-card` from the client's
-HTML template; Higgsfield only makes the untexted photographic **plate** that sits behind that type.
+WEB_ANCHOR = "## How work actually gets done"
+WEB_RULE = """## A social card is RENDERED from the template, never AI-generated
+
+A social feed card (Facebook / Instagram / LinkedIn / Google Business Profile) is the one artefact in
+the fleet that must carry legible type — headline, kicker, logo, brand rule. The producer renders it
+with `render-card` from the client's HTML template; Higgsfield only makes the untexted photographic
+**plate** that sits behind that type.
 
 **Your brief decides which one you get.** A visuals card must therefore always:
 - say **"social cards — RENDER FROM HTML TEMPLATES, NOT AI photos"**, and
@@ -96,9 +98,32 @@ def patch(path, edits, label):
     return True
 
 
+PUBLISHER = "/home/hermes/.hermes/profiles/publisher/SOUL.md"
+PUB_ANCHOR = "## Blocking usefully"
+PUB_RULE = """## A social card must be a rendered card, not a photo
+
+You are the last gate before something is public, so check the *asset*, not just that an asset
+exists. A branded social card is rendered from the client's HTML template by `render-card`, which
+only ever writes **PNG**. So:
+
+- `blog/<slug>/social/<slot>.png` — a real card. Open the presigned URL and confirm you can see the
+  **headline text** on it.
+- `blog/<slug>/social/<slot>.jpg` — **not a card.** That is a Higgsfield photographic plate someone
+  resized to the platform aspect ratio. It has no headline, no kicker and no logo.
+
+If you are handed a `.jpg` for a feed slot, or a URL whose image carries no legible text, **block and
+route to producer** with "social card was delivered as a resized AI plate, needs a template render".
+Do not attach it and do not schedule it, even when the brief hands you the URL directly — a brief
+that says "attach the correct platform-sized image" is not evidence that the image is a card. This
+happened on 2026-09-07: three live posts went out carrying bare stock-looking photos.
+
+"""
+
 ok = True
 r = patch(PRODUCER, [(PROD_OLD_PATH, PROD_NEW_PATH), (PROD_OLD_TAIL, PROD_NEW_TAIL)], "producer")
 ok = ok and r is not None
 r = patch(WEBSTER, [(WEB_ANCHOR, WEB_RULE + WEB_ANCHOR)], "webster")
+ok = ok and r is not None
+r = patch(PUBLISHER, [(PUB_ANCHOR, PUB_RULE + PUB_ANCHOR)], "publisher")
 ok = ok and r is not None
 sys.exit(0 if ok else 1)
