@@ -72,6 +72,25 @@ only pinning the agent below 2026.7.20 does.
    `docker exec <agent> chmod -R a+rX /opt/hermes`, then restart the webui. **Re-run this after
    every source-volume reset.**
 
+To remove the source volume the container must be **stopped and removed** first — a merely stopped
+container still holds it and `docker volume rm` fails with `volume is in use`.
+
+### Verified tag → version mapping (2026-09-07)
+
+The tag date is **not** the version, and two different builds can report the same version string.
+Verified by running `hermes --version` inside each image:
+
+| tag | version | upstream rev |
+|---|---|---|
+| `v2026.7.7.2` | v0.18.2 | — |
+| `v2026.8.18` | v0.20.4 | `e624e9fd` |
+| `v2026.8.31` | **v0.21.0** | `29112bef` |
+| `latest` / `main` (untagged rolling, 2026-09-06) | v0.21.0 | `693641aa` |
+
+Note the last two rows: **`v2026.8.31` and the rolling build both report `v0.21.0` but are different
+code.** Only the rolling one ships `/api/local-models/*` and `/api/audio/tts-lease`. Check the
+upstream rev, not the version string. See CLAUDE.md §16 for the Hermes Desktop route-gap detail.
+
 ## Verified working 2026-08-19
 - agent healthy on v2026.7.7.2, webui healthy on 0.51.680
 - `https://wi-agent.widev.com.au` -> 302 (login), Tailscale 18793 -> 302
