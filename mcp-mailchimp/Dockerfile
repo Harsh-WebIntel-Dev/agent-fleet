@@ -9,10 +9,13 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 RUN python3 -m venv /opt/mc \
  && /opt/mc/bin/pip install --no-cache-dir 'mailchimp-mcp==0.6.0' 'mcp<2'
-RUN npm install -g supergateway
+# Pinned: an unpinned `npm install -g supergateway` made every rebuild a silent version bump. 3.4.3 is
+# the version running in prod as of 2026-09-07 — bump deliberately, and re-check the crash noted in
+# README.md (supergateway throws an uncaught "No connection established for request ID" and exits).
+RUN npm install -g supergateway@3.4.3
 ENV PATH="/opt/mc/bin:${PATH}"
 WORKDIR /app
-COPY infisical_fetch.py entrypoint.sh ./
+COPY infisical_fetch.py infisical_probe.py entrypoint.sh ./
 RUN chmod +x entrypoint.sh
 EXPOSE 8080
 ENTRYPOINT ["/app/entrypoint.sh"]

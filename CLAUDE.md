@@ -185,7 +185,7 @@ actually happened.
 | `mcp-memory/` | Vectorised fleet memory (Postgres+pgvector, per-client RLS, per-agent) | current |
 | `mcp-postiz-extras/` | Postiz mgmt the built-in MCP lacks (`postiz_list/delete/set_status/edit`) | current |
 | `mcp-lnkbio/` | Lnk.Bio link-in-bio (rolling top-5), WI-only | current |
-| `mcp-mailchimp/` | Mailchimp newsletter drafts (draft-only, WI-only) — **blocked on Infisical key** | current |
+| `mcp-mailchimp/` | Mailchimp newsletter drafts (draft-only, WI-only) — **live** since 2026-09-07 | current |
 | `mcp-higgsfield/` | Higgsfield image/video generation | current |
 | `mcp-wordpress/` | Custom `wp-json` WordPress sidecar (7 tools) | current |
 | `mcp-spaces/` | R2 / DO Spaces asset store (ingest/presign/read/write) | current |
@@ -266,8 +266,11 @@ redis + a **tailscale-proxy** sidecar). **Tailnet-only — not internet-facing.*
   secrets it needs at boot; if Infisical is down it falls back to the Coolify env and boots anyway.
   Coolify is **not** a sync target — Infisical never pushes.
 - **Gotchas:** a `SITE_URL`/HTTPS misconfig blocks machine-identity creation; the `fleet-hermes`
-  identity is **read-only Viewer** (can't stage NEW secrets — which is why the Mailchimp key is
-  currently blocked; staging needs an admin token).
+  identity is **read-only Viewer** — it can READ every `/shared` secret but cannot stage a NEW one, so
+  adding a secret is always a human step with an admin token (this is what held Mailchimp up for six days).
+- **A pull only happens at boot.** Staging or rotating a secret changes nothing until the consuming
+  service is **redeployed**. A sidecar can be perfectly wired and still report a missing secret purely
+  because it has not restarted since the secret appeared.
 
 ---
 
@@ -285,7 +288,7 @@ All agents reach tools through the litellm **aggregated `/mcp/`** endpoint (Herm
 | **postiz** | self-hosted `postiz.widev.com.au` | `fleet_tools` | `integrationSchedulePostTool`, `integrationList`, `groupList`, `integrationSchema`, `triggerTool`, `generateImage/VideoTool`, `uploadFromUrlTool` | social + Google Business Profile; 10-tool allow-list (excludes `ask_postiz`) |
 | **postiz_extras** | sidecar `mcp-postiz-extras` | `fleet_tools` | `postiz_list`, `postiz_delete`, `postiz_set_status`, `postiz_edit` | fills gaps the built-in Postiz MCP lacks; delete-500 = success; 15-min past-slot guard on edit |
 | **lnkbio** | sidecar `mcp-lnkbio` | **`wi_tools`** | `lnkbio_list`, `lnkbio_set_link` | **WI-only**; rolling top-5 (adds a link, drops the oldest) |
-| **mailchimp** | sidecar `mcp-mailchimp` (node) | **`wi_tools`** | 17 **draft-only**: `create_campaign`, `update_campaign`, `set_campaign_content`, `send_test_email`, `list_audiences/templates/campaigns`, … | send/schedule/delete withheld at the gateway; **blocked on the Infisical key** |
+| **mailchimp** | sidecar `mcp-mailchimp` (node) | **`wi_tools`** | 18 **draft-only**: `create_campaign`, `update_campaign`, `set_campaign_content`, `send_test_email`, `list_audiences/templates/campaigns`, … | send/schedule/delete withheld at the gateway; **live 2026-09-07** (key pulled from Infisical `/shared`) |
 | **wordpress** | sidecar `mcp-wordpress` | `fleet_tools` | `wp_create_draft`, `wp_update_post`, `wp_get_post`, `wp_publish`, `wp_upload_media`, `wp_list_categories`, `account_status` | content-bot role; **WI site only** (not per-client yet) |
 | **higgsfield** | sidecar `mcp-higgsfield` | `fleet_tools` | `create_image_job`, `get_image_job`, `list_image_models`, `verify_url`, `account_status` | async: `create_image_job` → poll `get_image_job` |
 | **spaces** | sidecar `mcp-spaces` → **R2** | `fleet_tools` | `spaces_list`, `spaces_read`, `spaces_write`, `spaces_ingest_url`, `spaces_presign`, `spaces_delete` | asset store, bucket `fleet-clients` (see §6 Cloudflare) |
@@ -430,13 +433,34 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
 - `hermes-agent` upgrades past `v0.19.0 (2026.7.20)` crash-loop the webui (wheel-install guard) — pin
   deliberately; deployed agent is `v2026.8.18`.
 - prod-2 load is largely hypervisor **CPU steal**, not fleet workload — removing services won't fix it.
+- A sidecar entrypoint that logs one message for every Infisical failure hides which failure it is.
+  "Infisical unavailable" on mcp-mailchimp actually meant "authenticated fine, secret not staged" —
+  see §16. Check the store and the identity before concluding a sidecar is unwired.
+- `mcp-mailchimp` crash-restarts on an uncaught supergateway error (`No connection established for
+  request ID: 0`, 28 times in 6 days) — unrelated to its API key, masked by `restart: unless-stopped`.
+- Sidecar images are built **locally on prod-2** (e.g. `mcp-mailchimp:0.1.0`); there is no registry, so
+  a Coolify redeploy re-runs the entrypoint but does NOT pick up Dockerfile/entrypoint edits.
 
 ---
 
 ## 16. Open items
 
-- **Mailchimp key** — MCP built/wired/scoped (draft-only, WI-only) but **blocked** on staging
-  `MAILCHIMP_API_KEY` into Infisical `/shared` (needs an admin token).
+- ~~**Mailchimp key**~~ — **RESOLVED 2026-09-07.** `MAILCHIMP_API_KEY` was staged into Infisical
+  `/shared` (`prod`) and the service redeployed; the entrypoint now logs `pulled MAILCHIMP_API_KEY from
+  Infisical prod:/shared` and all 18 draft-only tools list and answer through the LiteLLM aggregated
+  endpoint (`list_audiences` returns live data). **The sidecar was never unwired** — its five
+  `INFISICAL_*` variables were byte-identical to `mcp-wordpress`/`mcp-spaces`/`mcp-higgsfield` and
+  unchanged since the service was created on 2026-09-01, and Infisical auth from inside the container
+  succeeds (verified by machine-identity login from the container). The only missing piece was
+  the secret itself; the ambiguous `Infisical unavailable -- env fallback` log line made it look like a
+  wiring fault. Entrypoint now distinguishes unreachable / not-staged / not-wired (see
+  `mcp-mailchimp/README.md`).
+- **mcp-mailchimp crash-restarts** — 28 restarts 2026-09-01→07 from an uncaught supergateway error
+  (`No connection established for request ID: 0`) on the stateless streamable-HTTP bridge. Independent
+  of the API key and still open; supergateway pinned to `3.4.3` so a rebuild can't shift it silently.
+- **mcp-mailchimp image rebuild** — the entrypoint diagnostics fix and the supergateway pin are in the
+  repo but NOT in the running `mcp-mailchimp:0.1.0` image (built locally on prod-2, no registry).
+  Rebuild on prod-2 to deploy them; behaviour is otherwise unchanged.
 - **review-notify email delivery** — failing ("no gateway credentials"); verify the email platform's
   SMTP creds are loaded.
 - **Per-client WordPress** — client keys can't publish to their own sites yet; client WP publishing is
