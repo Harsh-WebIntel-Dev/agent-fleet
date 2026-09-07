@@ -346,11 +346,19 @@ The in-process scheduler runs in `hermes-agent`; jobs in `cron/jobs.json`; manag
 | `marketing-task-sweep` | `12b1e0f820e9` | 15m | **MCP-only** (no gate): Webster lists his actionable ClickUp tasks himself and composes/reviews. |
 | `clickup-chat-intake` | `f3d04e2607f5` | 5m | `monitor_chat.py` gate → reads the changed channel; DM = answer all, group = only if @tagged. |
 | `semrush-blog-global-feed` | `21cb02f87693` | 07:00 | Ingest SEMrush blog → global memory + Spaces `clients/global/semrush-feed.md`. |
-| `review-notify` | `415989b00956` | 15m | Emails reviewers "ready for review". **Currently failing** ("email has no gateway credentials") — email platform is enabled but the cron's `deliver: email` SMTP creds are not loaded; verify before relying on it. |
+| `review-notify` | `415989b00956` | 15m | `monitor_review.py` gate → emails "ready for review" via `deliver: email:…`. **Healthy and delivering** — every run `completed`; last real send 2026-09-05 09:09 AEST. Quiet runs are correct, not broken (see the trap in §15). **But it only reaches Paul** — see below. |
 
 **Monitor-gate pattern:** a job may name a `monitor_script`/`monitor_url`; Hermes runs it each tick and
 wakes the LLM only when its output hash **changes**. The task-sweep deliberately has **no** gate; the
 chat intake keeps its gate because it does real channel-routing, not just cost-gating.
+
+**⚠️ `review-notify` reaches ONE reviewer, not four.** Its `deliver` is
+`email:paulthewlis@…,harry@…,nipuni@…,harsh@…`. The scheduler splits `deliver` on comma **first**
+(`_resolve_delivery_targets`, `cron/scheduler.py:2310`) and only then parses each part as
+`platform:target`. The three bare addresses have no `email:` prefix, so each is read as a *platform
+name*, fails `_is_known_delivery_platform`, and is dropped by a `return None` that **logs nothing**.
+Every `delivered to email:…` line in `agent.log` names Paul alone. Correct form is a prefix on every
+address: `email:a@x,email:b@x,email:c@x`.
 
 **⚠️ Cron traps:** (a) a killed/`timeout`-wrapped `hermes cron run` can baseline-without-processing and
 stick "no change" — never wrap it in `timeout`. (b) A cron's first tick fired inside the webui session
@@ -372,13 +380,95 @@ Two independent layers, both set 2026-09-03:
 
 ---
 
-## 11. Reminders (Webster)
+## 11. Reminders & outbound email (Webster)
 
 SOUL `## Reminders`: on request he schedules with `cronjob` — **one-off** `cronjob(action="create",
 repeat=1, schedule=<cron-expr or "2h">, prompt=<self-contained>)` (`repeat=1` = "once", Melbourne
 wall-clock); **recurring** = a recurring expr / the `custom-reminder` blueprint. He **DMs** the person
 with `clickup_send_chat_message` when it fires (ClickUp isn't a cron `deliver` target). The cron prompt
 must be **self-contained** (fired crons are isolated turns): who (name+uid), where (channel id), what.
+
+### Outbound email — the mechanism
+
+There is **no email-send tool, and none is needed**. The **scheduler** delivers a job's turn output, so
+a fresh outbound email is a one-off cron job:
+
+```
+cronjob(action="create", repeat=1, schedule="2m",
+        deliver="email:<address>", prompt=<self-contained, body text only>)
+```
+
+The job's **entire reply becomes the email body** — the prompt must produce body text with no
+To/From/Subject lines. `review-notify` is the working precedent; its prompt says *"Your ENTIRE reply
+becomes the email body and is sent automatically — do not try to send it yourself."* Replies to
+**inbound** email need none of this: the email adapter returns that turn's reply to the sender.
+
+Get the deliver framing right — "ClickUp isn't a `deliver` target" is true but reads as *"`deliver` is
+a chat concept"*, which is wrong: **chat platforms AND email are `deliver` targets; ClickUp is the
+exception.** For ClickUp use `clickup_send_chat_message`; for email use `deliver="email:…"`.
+`email` is in `_KNOWN_DELIVERY_PLATFORMS` (`cron/scheduler.py:459`) and maps to `EMAIL_HOME_ADDRESS`
+(set live), so a bare `deliver="email"` reaches the configured default recipient. **Always set
+`deliver` explicitly**: omitting it means "origin", and from inside a cron run
+`_resolve_cron_context_deliver` rewrites origin to the *creating job's* target — `local` for both of
+Webster's sweeps, i.e. stored and delivered nowhere. `_local_delivery_notice()`
+(`tools/cronjob_tools.py:359`) returns a create-time notice in that case, so the mistake is visible to
+the agent rather than silent.
+
+### ⚠️ `cronjob` is stripped from cron runs — the capability is config-gated
+
+`deliver` **is** exposed to the model: it is in `CRONJOB_SCHEMA` and the registry handler forwards
+`deliver=args.get("deliver")` (`tools/cronjob_tools.py:1782`). The dashboard JSON-RPC path
+(`tui_gateway/methods_tools.py`, `action=='add'`) forwards only name/schedule/prompt/repeat/continuity,
+but that is **not** the in-turn path — the agent binds the registry tool directly.
+
+The real gate is elsewhere. `cron.allow_agent_scheduling` is **`false`**, so
+`_resolve_cron_disabled_toolsets` (`cron/scheduler.py:358`) returns
+`['cronjob','messaging','clarify','memory']` for every cron-spawned agent, and
+`_compute_tool_definitions` subtracts `disabled_toolsets` **unconditionally** — its docstring claims
+"if enabled_toolsets is None", but the code applies it always (`model_tools.py`, issue #17309). So
+even though `platform_toolsets.cron` lists `cronjob`, a cron run does not get the tool.
+
+**Both of Webster's intake paths are cron runs** (`marketing-task-sweep`, `clickup-chat-intake`), so
+in his autonomous turns he has no `cronjob` tool at all — and an email-triggered turn has none either
+(`platform_toolsets.email` omits it). It resolves only in webui/CLI-class sessions: the single
+`cronjob` call in the whole log history is 2026-09-02 01:03:24 from webui session `df92ce6f967d`,
+which created job `5928f1e333cb`.
+
+Enabling `cron.allow_agent_scheduling: true` is what makes autonomous outbound email possible.
+`load_config()` is cached on the config file's `(mtime_ns, size)` and `run_job` reloads per run, so
+that edit **applies on the next tick with no restart**. An explicit `deliver` survives a cron-context
+create untouched — `_resolve_cron_context_deliver` rewrites only `origin`/omitted, and passes
+`platform:…` through verbatim (`tools/cronjob_tools.py:454`).
+
+**What the flag actually widens — measured, not assumed.** It grants `cronjob` and nothing else.
+`_resolve_cron_disabled_toolsets` hardcodes the other three in **both** branches:
+
+| flag | denylist for every cron-spawned agent |
+|---|---|
+| `false` (current) | `['cronjob', 'messaging', 'clarify', 'memory']` |
+| `true` | `['messaging', 'clarify', 'memory']` |
+
+Delta = **`cronjob` only**. It does *not* restore messaging, clarify or memory — a natural but wrong
+reading of the branch. And the `memory` in that list is the **local** memory toolset (one tool named
+`memory`, "personal notes + user profile"), **not** mcp-memory: `memory_search` / `memory_remember` /
+`memory_register_client` arrive via the `pm_comms` MCP server, which is enabled in cron runs and is
+not on the denylist. So **Webster's client-readiness gate is unaffected** by this flag — it works
+today and keeps working. The local `memory` tool is already unavailable in cron runs either way.
+
+**Blast radius: none, for three independent reasons.** (1) Profile configs are **standalone, not
+inherited** — `get_config_path()` resolves to `profiles/<name>/config.yaml`, a complete config with
+its own `platform_toolsets`, so setting the flag in the main file leaves each specialist's loaded
+value at `false`. (2) Only the main config lists `cronjob` in `platform_toolsets.cron`; the five
+specialist profiles omit it, so even the flag forced `true` leaves a specialist without the tool
+(verified). (3) No specialist has a cron job at all — `profiles/*/cron/jobs.json` does not exist.
+
+**Convention: set it explicitly in all six places** — `true` in the main config (Webster owns
+orchestration), and an explicit `false` in each of the five specialist profiles. Not because
+inheritance would leak it, but so nobody has to reason about precedence later: a specialist runs one
+stage and must never write the cron table. An unattended specialist creating recurring jobs is a
+failure mode to foreclose, not discover. No `cron:` section exists in the main config today, so this
+adds one; `load_config()` does `_deep_merge(DEFAULT_CONFIG, user_config)`, so a partial block keeps
+`preflight`, `wrap_response`, `script_timeout_seconds` and the other cron defaults intact.
 
 ---
 
@@ -425,6 +515,20 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
 - Never wrap `hermes cron run` in `timeout` (baselines-without-processing → stuck "no change"); a
   cron's first tick inside its creating webui session logs a **false** `failed`.
 - Memory global recall needs `across_agents=True` (per-agent scoping by default).
+- A missing review email is almost always a **board** problem, not an email problem: with no task in
+  `in review`, `monitor_review.py` emits the stable `review-notify:none`, hash-suppression fires, the
+  turn replies `[SILENT]` and delivery is correctly suppressed. **Every such run still logs
+  `completed`** — so an unbroken run of `completed` is NOT evidence that mail is leaving the box.
+  Prove it with `grep "delivered to email" logs/agent.log`, never from the run ledger.
+- A cron `deliver` list needs the `platform:` prefix on **every** comma-separated entry; bare extras
+  are parsed as platform names and dropped with no log line at all (this is why `review-notify` has
+  only ever emailed Paul).
+- `cronjob` is subtracted from every cron-run agent while `cron.allow_agent_scheduling` is false, so
+  an agent whose only intake is a cron job cannot schedule anything — including the one-off job that
+  sends an email. `disabled_toolsets` always wins over `enabled_toolsets`, despite the docstring.
+- Recurring `[Email] IMAP fetch error` / `email_imap_fetch_failed` in `errors.log` are **inbound**
+  Gmail flakiness and say nothing about sending; the gateway reconnects and logs `SMTP connection test
+  passed` right after. Judge outbound health by the SMTP lines, not the IMAP ones.
 - Postiz `delete` returns 500-means-success and removes only the Postiz record, not the live post; a
   recreate at a slot already passed publishes a **duplicate** (postiz-extras has a 15-min past-slot guard).
 - `hermes-agent` upgrades past `v0.19.0 (2026.7.20)` crash-loop the webui (wheel-install guard) — pin
@@ -437,8 +541,18 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
 
 - **Mailchimp key** — MCP built/wired/scoped (draft-only, WI-only) but **blocked** on staging
   `MAILCHIMP_API_KEY` into Infisical `/shared` (needs an admin token).
-- **review-notify email delivery** — failing ("no gateway credentials"); verify the email platform's
-  SMTP creds are loaded.
+- ~~**review-notify email delivery** — failing ("no gateway credentials")~~ **CLOSED 2026-09-07.** Not
+  failing: the job is `[active]`, delivering, last real send 2026-09-05 09:09 AEST, and `SMTP
+  connection test passed` as recently as 2026-09-07 14:43 AEST. The "no gateway credentials" reading
+  came from quiet runs, which are the correct behaviour (§15). **Superseded by a real defect:** its
+  `deliver` list reaches **Paul only** — the other three addresses lack the `email:` prefix and are
+  silently dropped (§9). Fix with `hermes cron edit` (applies next tick, no restart).
+- **Webster's outbound email** — the runtime supports it (`cronjob` + `deliver="email:…"`); the gap was
+  documentation, not capability. Two changes needed, neither requiring a restart: set
+  `cron.allow_agent_scheduling` explicitly in all six configs (`true` in the main config so Webster's
+  cron-run turns keep the `cronjob` tool, `false` in each of the five specialist profiles), and add
+  the outbound section to his SOUL. The flag grants `cronjob` and nothing else, and cannot reach the
+  specialists — see §11 for the measurements.
 - **Per-client WordPress** — client keys can't publish to their own sites yet; client WP publishing is
   held until wired.
 
