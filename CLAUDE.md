@@ -427,8 +427,18 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
 - Memory global recall needs `across_agents=True` (per-agent scoping by default).
 - Postiz `delete` returns 500-means-success and removes only the Postiz record, not the live post; a
   recreate at a slot already passed publishes a **duplicate** (postiz-extras has a 15-min past-slot guard).
-- `hermes-agent` upgrades past `v0.19.0 (2026.7.20)` crash-loop the webui (wheel-install guard) — pin
-  deliberately; deployed agent is `v2026.8.18`.
+- `hermes-agent` upgrades past `v0.19.0 (2026.7.20)` crash-loop the webui (wheel-install guard). The
+  webui container was removed 2026-09-04, so this **no longer constrains the agent** — but keep the
+  pin deliberate. Deployed agent is `v2026.8.18` = **v0.20.4**.
+- **The `hermes-agent-src` volume shadows the image.** `<service>_hermes-agent-src:/opt/hermes`
+  populates **only when empty**, so changing the image tag alone changes NOTHING — `hermes --version`
+  keeps reporting the old build. A tag bump MUST be paired with
+  `docker volume rm zhvjhbo5752ovx1nl2rk9v30_hermes-agent-src` (container stopped+removed first, or
+  the rm fails with "volume is in use"). **NEVER remove `hermes-home`** — it holds `config.yaml`,
+  SOULs, auth and sessions. After the reset `/opt/hermes` may come back root-owned and unreadable to
+  uid 1000 → `docker exec <agent> chmod -R a+rX /opt/hermes`.
+- **Upgrading to 0.21.0 does NOT add the routes Hermes Desktop wants** (verified 2026-09-07, §16).
+  Do not assume a version bump closes a Desktop route gap — diff the image source first.
 - prod-2 load is largely hypervisor **CPU steal**, not fleet workload — removing services won't fix it.
 
 ---
@@ -441,6 +451,31 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
   SMTP creds are loaded.
 - **Per-client WordPress** — client keys can't publish to their own sites yet; client WP publishing is
   held until wired.
+- **LiteLLM WI team budget exceeded** — `marketing-task-sweep` began failing 2026-09-07 with
+  `HTTP 429: Budget has been exceeded! Team=96d591df-… Current cost: 89.19, Max budget: 50.0`.
+  Webster's task intake is down until the team budget is raised or reset. Unrelated to any image
+  version; found during the 0.21.0 upgrade investigation.
+- **Hermes Desktop 0.21.0 route gap — upgrading the agent does NOT fix it** (investigated 2026-09-07,
+  read-only; prod left on v0.20.4). Tag → version, verified by running `hermes --version` in each
+  image:
+
+  | image tag | version | upstream rev | `/api/local-models/*` | `/api/audio/tts-lease` |
+  |---|---|---|---|---|
+  | `v2026.8.18` (deployed) | v0.20.4 | `e624e9fd` | 0 | absent |
+  | `v2026.8.31` (newest explicit tag) | **v0.21.0** | `29112bef` | 0 | absent |
+  | `latest`/`main` (untagged rolling, 2026-09-06) | v0.21.0 | `693641aa` | **16** | **present** |
+
+  Findings: (a) `v2026.8.31` is the newest **explicit** tag providing ≥0.21.0, but it adds only
+  `/api/audio/voice-config`, `/api/hermes/update/receipt`, `/api/sessions/owner-backfill`, `/api/tags`
+  and removes nothing — **none of the routes Desktop wants**. (b) The 4× `/api/dashboard/agent-plugins/*`
+  and plugin-visibility **405s are NOT missing routes** — those paths exist *identically in all three
+  builds including the deployed 0.20.4*, declared `POST`/`DELETE`/`PUT`. A 405 means the path exists
+  but the method isn't allowed, so Desktop is calling them with the wrong verb; **no image upgrade
+  changes this**. (c) Only the untagged rolling build carries `local-models` + `tts-lease`, and it
+  reports the same `0.21.0` version string — so version number alone cannot distinguish them.
+  Closing the gap therefore requires pinning that build **by digest**
+  (`nousresearch/hermes-agent@sha256:efb82540aeb8ac21c58ecb4482bd3eb103ea617da2af2c61f12526ed68f6c2d9`),
+  which conflicts with the tag-over-digest convention — a deliberate call, not a routine bump.
 
 ---
 
