@@ -297,6 +297,20 @@ All agents reach tools through the litellm **aggregated `/mcp/`** endpoint (Herm
 
 ### ⚠️ Tool mounting is a RACE, and losing it is silent
 
+**This affects EVERY specialist, not just `producer`.** The race is in the shared worker-startup
+path, so `seo`, `researcher`, `writer`, `producer` and `publisher` are all equally exposed — it is
+decided by how loaded the box is and how slow the aggregated `/mcp/` endpoint is that second, not by
+which profile is running. It hit twice on 2026-09-07, on two different profiles:
+
+| Card | Profile | What happened |
+|---|---|---|
+| `t_d44a78e0` | **producer** | 14:08 — discovery *failed* (`registered 0 tool(s) … (1 failed)`); ran 16 min tool-less, then blocked. Its block text blamed missing **sandbox credentials** — the wrong layer entirely, which cost an hour of investigation. |
+| `t_e0a2bd40` | **seo** | 17:14 — discovery *succeeded* in 9.8 s and **still lost**: registration landed **2.5 s after** the agent snapshot. Blocked `transient`, correctly naming "Semrush and ClickUp MCP absent, cold-start failure". Its retry at 17:33 got all 132 tools. |
+
+The seo case is the one to internalise: discovery finished comfortably inside the 15 s bound and the
+dispatch was *still* tool-less, because what matters is not "did discovery finish in time" but "did
+registration land **before the agent snapshotted its registry**".
+
 A kanban worker is a **fresh subprocess** — `hermes -p <profile> --cli --toolsets <…,pm_comms,…>
 chat -q "work kanban task <id>"` (`hermes_cli/kanban_db.py:_default_spawn`). It re-discovers the
 whole `pm_comms` toolset **live, from scratch, on every dispatch**. Three bounds decide whether it
@@ -333,6 +347,32 @@ that actually reached the model, and it must appear **after** the registration l
 Measured discovery latency (session-ID → registration): **2.6–7.7 s** across Aug 24–31 (107–113
 tools, no mailchimp) → **6–50 s** on 2026-09-07 (132 tools, mailchimp live). Adding one slow
 upstream moved the fleet from "always wins the race" to "sometimes loses it".
+
+The margin, measured per dispatch on 2026-09-07 — every run that **won** had 12–19 s between the MCP
+session opening and the agent build; both runs that **lost** had 2.2–5.9 s:
+
+| Dispatch | session → registration | session → agent build | Outcome |
+|---|---|---|---|
+| producer 13:37 | 15.8 s | 19.2 s | ✅ 132 tools |
+| publisher 14:43 | 15.4 s | 20.9 s | ✅ 132 tools |
+| seo 17:24 | 7.0 s | 13.0 s | ✅ 132 tools |
+| seo 17:33 | 8.3 s | 12.1 s | ✅ 132 tools |
+| **seo 17:15** | 9.8 s | **2.2 s** | ❌ 0 tools |
+| **producer 14:10** | never (failed) | **5.9 s** | ❌ 0 tools |
+
+**Mitigation (config only, no restart).** `hermes/scripts/apply-mcp-timeouts.sh` widens both bounds:
+`mcp_single_query_discovery_timeout` 15 → 120 and `mcp_servers.pm_comms.connect_timeout` 60 → 90.
+The wait bound **must exceed** the connect bound — otherwise the build can still snapshot an empty
+registry while a connect is in flight, which is exactly how `t_e0a2bd40` lost. Costs nothing on
+healthy dispatches (`thread.join(timeout=N)` returns the instant discovery completes), and workers
+are fresh processes that read their profile `config.yaml` at startup, so it lands on the **next
+dispatch** with no restart and no cache clear.
+
+**Fail-loud guard.** Hermes has no `mcp_required`/`mcp_strict` knob (verified by grep across
+`/opt/hermes`), so a tool-less worker will improvise for a full dispatch. `hermes/scripts/
+apply-toolset-guard.sh` inserts a turn-1 rule into all five specialist SOULs: no `mcp__pm_comms__*`
+→ block immediately with a `TOOLSET-NOT-MOUNTED` marker, and explicitly **do not** go hunting for
+credentials in the sandbox (the mistake `t_d44a78e0` made). SOULs are read per-turn — no restart.
 
 ### Sidecar build pattern
 
@@ -499,6 +539,29 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
   streamable-HTTP server. Zero-downtime mitigation on the Hermes side: raise
   `mcp_single_query_discovery_timeout` + `mcp_servers.pm_comms.connect_timeout` in each specialist
   profile's `config.yaml` (workers are fresh processes — takes effect next dispatch, no restart).
+- **Cut the mailchimp upstream tool surface at the SOURCE, not at the gateway** *(open, 2026-09-07 —
+  proposed, not implemented)*. This is the real cost driver behind the tool-mount race; widening
+  timeouts treats the symptom. The upstream `mailchimp-mcp==0.6.0` advertises **115 tools**; the
+  LiteLLM `allowed_tools` allow-list keeps **18** and discards 97. But the allow-list filters the
+  *response* — every client connect still pays the full handshake for all 115. Measured on prod-2:
+
+  | sidecar | tools advertised | `tools/list` |
+  |---|---|---|
+  | spaces | 6 | 0.19–0.24 s |
+  | higgsfield | 5 | 0.13 s |
+  | postiz-extras | 4 | 0.21–0.39 s |
+  | **mailchimp** | **115** | **7.1–10.9 s** |
+  | aggregate (all 10) | 128 | 12.2–15.8 s |
+
+  So one sidecar is 30–50× slower than every other and accounts for essentially the whole aggregate
+  latency — which is what pushed the fleet from "always wins the tool-mount race" (2.6–7.7 s in
+  August) to "sometimes loses it" (6–50 s). `mailchimp-mcp==0.6.0` exposes **no** tool-filter knob
+  (only `MAILCHIMP_API_KEY`, `MAILCHIMP_DRY_RUN`, `MAILCHIMP_READ_ONLY` — and read-only would break
+  the 6 write tools the publisher needs). Options, roughly in order of appeal: (a) wrap the child in
+  a thin stdio filter that answers `tools/list` with just the 18 and passes everything else through;
+  (b) replace the third-party server with an in-house `mcp-mailchimp` exposing only the 18 tools we
+  actually allow-list, matching the pattern every other sidecar already uses; (c) leave it and rely
+  on the widened bounds. Do (a) or (b) — (c) is where we are now and it is a coin-flip under load.
 - **No fail-loud when a worker starts tool-less.** Hermes has no `mcp_required`/`mcp_strict` knob
   (verified by grep across `/opt/hermes`), so a specialist with zero MCP tools improvises for the
   full dispatch and only then blocks. Cheapest available guard: a turn-1 rule in all five specialist
