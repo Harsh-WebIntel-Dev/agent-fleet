@@ -230,6 +230,24 @@ actually happened.
   `x-litellm-tags` header (agent/client/fleet) for spend attribution. Setting `provider="litellm-<slug>"`
   on a kanban card (§4) makes the specialist run on that client's key → their budget. Key/budget/spend
   **state lives in `litellm-postgres`**; litellm also has a `tailscale-proxy` sidecar.
+- **⚠️ Per-client billing is NOT actually in effect (found 2026-09-07).** `LITELLM_KEY_BIOGONE`,
+  `_PRIDE_ADVICE`, `_RADIANCE_WEALTH` are **absent from the `hermes-agent` container env** (`docker
+  inspect` shows only `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`),
+  so every `litellm-<slug>` provider falls back to the default → the WI key. **The whole fleet —
+  Webster and all 5 specialists, for every client — runs on one key: `hermes-webintelligenz`
+  (`sk-...FbqQ`, team `client-webintelligenz`).** That is why the client teams each hold a real budget
+  (500/500/200/100/10/5) with **zero** spend while WI carries 100% of it. Last call ever billed to a
+  client team: `client-biogone`, 2026-09-01 02:13 UTC, $0.0107. Consequence: a cap on the WI team
+  stops the *entire* fleet, not just the default profile.
+- **How a budget is actually enforced (≠ the team row's `spend`).** `_team_max_budget_check`
+  (`litellm/proxy/auth/auth_checks.py`) gates on `team.max_budget` but reads spend from a **separate
+  cross-pod counter** `spend:team:<team_id>` via `get_current_spend()` — *not* from
+  `LiteLLM_TeamTable.spend`. **No Redis is configured here**, so that counter is plain in-process
+  memory: it seeds from the team row on first touch and dies with the container. `get_current_spend`
+  returns early once `counter >= max_budget`, and `_repair_stale_spend_counter` only corrects counters
+  reading *low* — a **stale-high counter is never repaired downward**. So the number in a 429 can be
+  nothing like the DB, and `LiteLLM_BudgetTable` / `budget_id` / `LiteLLM_Config` are all empty here —
+  don't go looking for the cap there.
 - **⚠️ DESTRUCTIVE TRAP:** `POST /v1/mcp/server` **replaces** a record and **nulls** omitted fields
   (caused a ~15-min Postiz outage). No PATCH. To change a config-defined server: edit `config.yaml` +
   `DELETE /v1/mcp/server/{id}` + restart (re-seeds from config). A key's `blocked_tools` does NOT
@@ -430,6 +448,25 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
 - `hermes-agent` upgrades past `v0.19.0 (2026.7.20)` crash-loop the webui (wheel-install guard) — pin
   deliberately; deployed agent is `v2026.8.18`.
 - prod-2 load is largely hypervisor **CPU steal**, not fleet workload — removing services won't fix it.
+- **The LiteLLM team spend counter reads exactly 2× real spend.** `cost_tracking()`
+  (`proxy_server.py:2210-2211`) registers **two separate `_ProxyDBLogger()` instances** — one into
+  `litellm.callbacks`, one into `litellm._async_success_callback`. Dedup in `logging_callback_manager`
+  is **per-list**, so the two are not collapsed; both fire `increment_spend_counters()`, which has no
+  per-request idempotency guard. DB writes dedupe on `request_id`, so `LiteLLM_TeamTable.spend` stays
+  correct while the in-memory counter doubles. Proven 2026-09-07: the enforced counter read
+  `89.18942867999993` = **exactly 2 ×** the team's recorded `44.59471433999997`, having seeded from
+  `0.00000000` at container start. **Any team `max_budget` therefore bites at ~half its dollar value.**
+  It self-clears on a litellm restart (reseeds from the team row) and on the 30d reset
+  (`reset_budget_job.py:688` invalidates `spend:team:<id>` after the DB write).
+- **A team 429 can quote figures that exist nowhere in the DB.** Team objects cache for only
+  `DEFAULT_IN_MEMORY_TTL = 5s`, so a `max_budget` in a 429 *is* live in `LiteLLM_TeamTable` at that
+  moment — but the `Current cost` comes from the doubled in-memory counter (above), not `team.spend`.
+- **Cost is dominated by DeepSeek prompt-cache hit rate, not call volume.** All four aliases
+  (`fast`/`standard`/`deep`/`flash`) are the same `deepseek-v4-pro` route priced at list cache-miss
+  ($1.32/1M in). Measured: cache-served traffic runs **~$0.21/1M** prompt tokens, cache-missing
+  traffic **~$1.45/1M** — a **~7×** swing on identical volume. 2026-09-07 ran 444 billed calls at a
+  normal 42.5k avg prompt tokens yet cost **$18.86** vs $4.05 the day before, 92% of it cache-missing.
+  Judge burn by $/1M prompt tokens, never by call count.
 
 ---
 
@@ -441,6 +478,18 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
   SMTP creds are loaded.
 - **Per-client WordPress** — client keys can't publish to their own sites yet; client WP publishing is
   held until wired.
+- **WI team budget cap — REMOVED, needs a deliberate value (2026-09-07).**
+  `LiteLLM_TeamTable.max_budget` for `client-webintelligenz`
+  (`96d591df-c5dc-4135-a543-6749ae01b402`) is **NULL** → *no ceiling on the whole fleet*. It briefly
+  held `50.0` and took intake down 03:19:26–03:28:56 UTC (`marketing-task-sweep` 429s); removing the
+  cap restored it. Before setting a new one: the enforced counter is **2× real spend** (§15), so a cap
+  of $N blocks at ~$N/2, and the counter already carries a head start of ~2 × spend-since-container-start
+  unless litellm is restarted first. Period spend (since the 2026-09-01 reset) was **$55.52** at
+  04:19 UTC 2026-09-07; steady state is ~$4.2/day with intermittent $6–19/day work bursts. Spend and
+  the counter both auto-zero at `budget_reset_at = 2026-10-01 00:00`.
+- **Per-client LiteLLM keys missing from `hermes-agent`** — `LITELLM_KEY_*` are absent from the
+  container env (§6), so all client work bills the WI key and the client budgets are inert. Wiring
+  them is what makes §4's per-client billing real.
 
 ---
 
