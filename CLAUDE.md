@@ -455,9 +455,27 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
   the secret itself; the ambiguous `Infisical unavailable -- env fallback` log line made it look like a
   wiring fault. Entrypoint now distinguishes unreachable / not-staged / not-wired (see
   `mcp-mailchimp/README.md`).
-- **mcp-mailchimp crash-restarts** — 28 restarts 2026-09-01→07 from an uncaught supergateway error
-  (`No connection established for request ID: 0`) on the stateless streamable-HTTP bridge. Independent
-  of the API key and still open; supergateway pinned to `3.4.3` so a rebuild can't shift it silently.
+- ~~**mcp-mailchimp crash-restarts**~~ — **RESOLVED 2026-09-07.** 36 deaths 2026-09-01→07 from an
+  uncaught supergateway error (`No connection established for request ID: 0`): `transport.send()` is
+  `async` but is wrapped in a *synchronous* try/catch, so the rejection escaped and Node 20 treated it
+  as fatal. Guarded with `NODE_OPTIONS=--unhandled-rejections=warn` on the Coolify service. Since it
+  went live: **0 fatal exits, 18 rejections survived, `RestartCount` 14 → 0.** Remove the guard once
+  supergateway awaits/catches `transport.send()`; it stays pinned to `3.4.3`.
+- **A `blocked` card can be completed with no deliverable, and the chain consumes the false `done`.**
+  `kanban_db.complete_task()` accepts `blocked -> done` as an ordinary transition (docstring:
+  "Transition `running|ready|blocked|review -> done`"). It takes no artefact argument and performs **no
+  deliverable check**; `result` and `summary` are optional. Reachable without any worker run from the
+  dashboard bulk status verb (`plugins/kanban/dashboard/plugin_api.py:1344`) and from
+  `hermes kanban complete <id>`. On 2026-09-07 `t_d44a78e0` (producer REDO hero) blocked at 14:24:52
+  having produced nothing, was completed at 19:27:49, and that completion **promoted its child**
+  `t_1120c214` in the same second — which then burned a dispatch discovering R2 still held only the
+  old hero. This is the inverse of §4 step 5: not a comment lying about work, but the *board* lying.
+  **The audit trail records no actor** — `task_events` stores no author for a completion, so operator
+  edits are indistinguishable from each other after the fact. Signature of one of these:
+  `kind=completed` with **`run_id` NULL and `summary` NULL** (`result_len: 0` is NOT the tell — normal
+  worker completions show it too). Exactly 3 exist in `kanban.db`: `t_d44a78e0` 19:27:49,
+  `t_ba0a7fb4` 13:19:47, `t_67f3d12f` 13:19:43. Wanted: an actor column, and a guard that refuses
+  `blocked -> done` without either an artefact or an explicit override flag.
 - **mcp-mailchimp image rebuild** — the entrypoint diagnostics fix and the supergateway pin are in the
   repo but NOT in the running `mcp-mailchimp:0.1.0` image (built locally on prod-2, no registry).
   Rebuild on prod-2 to deploy them; behaviour is otherwise unchanged.
