@@ -473,9 +473,27 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
   **The audit trail records no actor** — `task_events` stores no author for a completion, so operator
   edits are indistinguishable from each other after the fact. Signature of one of these:
   `kind=completed` with **`run_id` NULL and `summary` NULL** (`result_len: 0` is NOT the tell — normal
-  worker completions show it too). Exactly 3 exist in `kanban.db`: `t_d44a78e0` 19:27:49,
-  `t_ba0a7fb4` 13:19:47, `t_67f3d12f` 13:19:43. Wanted: an actor column, and a guard that refuses
-  `blocked -> done` without either an artefact or an explicit override flag.
+  worker completions show it too). Exactly 3 exist in `kanban.db`, and **two of them are a bulk action**
+  — `t_67f3d12f` at **2026-08-31 13:19:43** and `t_ba0a7fb4` at **13:19:47**, four seconds apart, which
+  reads as one dashboard multi-select rather than two considered decisions; `t_d44a78e0` followed on
+  2026-09-07 19:27:49. Wanted: an actor column, and a guard that refuses `blocked -> done` without
+  either an artefact or an explicit override flag.
+- **`t_67f3d12f` destroyed real work and the board still hides it (UNRESOLVED, needs a human).**
+  Artefact-verified read-only 2026-09-07, 12 days after the card was marked `done`:
+  **post 5147 was never published** — `GET /wp-json/wp/v2/posts/5147` returns `401 rest_forbidden` and
+  `/?p=5147` returns `404`, while the same endpoints return `200` for published posts 5184 and 5127;
+  and **its four Postiz socials are all still `DRAFT`** (`cmt95e71g…`/`cmt95e72b…` facebook,
+  `cmt95e7f5…` instagram, `cmt95e7wa…` gmb), never armed. Its two runs (23, 24) both crashed with
+  `exit code 1` and the dispatcher gave up; the worker's own 2026-08-26 comment already said "post 5147
+  is still draft, socials not armed". Nothing ran between then and the completion. Re-dispatch is a
+  human decision — and note two traps: those four Postiz records are **drafts**, which per §7 cannot be
+  re-armed by id and must be recreated, and their slots are 12 days past, so a recreate at the original
+  slot publishes immediately (§15). One draft's body is the literal URL `webintelligenz.com/?p=5147`,
+  which currently 404s.
+  By contrast `t_ba0a7fb4` (the other half of that bulk action) lost nothing: run 37 ran ~16 min,
+  produced a real 2,860-char verification finding, and the defect it found was later remediated — the
+  imageless FB post `cmt85l18z…` is soft-deleted and `cmtqrk3a7…` published 2026-09-07 05:30 with an
+  image. Closing that card was defensible; closing `t_67f3d12f` was not.
 - **mcp-mailchimp image rebuild** — the entrypoint diagnostics fix and the supergateway pin are in the
   repo but NOT in the running `mcp-mailchimp:0.1.0` image (built locally on prod-2, no registry).
   Rebuild on prod-2 to deploy them; behaviour is otherwise unchanged.
