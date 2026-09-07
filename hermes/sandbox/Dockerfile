@@ -14,6 +14,22 @@ RUN apt-get update \
 RUN apt-get update \
  && apt-get install -y --no-install-recommends chromium fonts-dejavu fonts-liberation fonts-noto-core \
  && rm -rf /var/lib/apt/lists/*
+# Web Intelligenz brand fonts, installed SYSTEM-WIDE so `font-family:'Jost'` / `'Open Sans'` in a card
+# template resolve from disk instead of depending on a fonts.googleapis.com round-trip mid-render. The
+# templates still carry their Google Fonts <link> as a fallback, but a render must not be able to
+# silently substitute Liberation Sans for Jost and ship a card that only looks subtly wrong.
+# Open Sans is Debian-packaged; Jost is not, so it is pinned to a google/fonts commit (variable weight
+# axis — fontconfig exposes the named instances, verified with `fc-match Jost:weight=bold`).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends fonts-open-sans \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /usr/local/share/fonts/jost \
+ && curl -fsSL -o "/usr/local/share/fonts/jost/Jost[wght].ttf" \
+      https://raw.githubusercontent.com/google/fonts/91b26e2e0231f5aa85f5470a7b23d6d732ab15fc/ofl/jost/Jost%5Bwght%5D.ttf \
+ && chmod 644 "/usr/local/share/fonts/jost/Jost[wght].ttf" \
+ && fc-cache -f \
+ && fc-list | grep -q Jost \
+ && fc-list | grep -q "Open Sans"
 COPY render-card /usr/local/bin/render-card
 COPY qa-shot /usr/local/bin/qa-shot
 RUN chmod +x /usr/local/bin/render-card /usr/local/bin/qa-shot

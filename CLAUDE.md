@@ -171,6 +171,14 @@ config). A request/feedback email is treated like a ClickUp DM (gate → compose
 memory (global or client-scoped) and confirms. Email is a front door, never a second source of truth,
 and never approval to go live. Email is **Webster-only** — pinned OFF on the 5 specialists.
 
+**9 — A social card is RENDERED, never AI-generated.** The one artefact in the fleet that must carry
+legible type is a social feed card (Facebook/Instagram/LinkedIn/GBP). It is produced by `render-card`
+from the client's HTML template — headline, kicker, logo, brand rule, palette — **never** by
+Higgsfield. Higgsfield's job is the untexted photographic **plate** that sits *behind* that type. The
+brief Webster writes is what decides this, so **every visuals card must name the template paths**
+(`social/fb.html`, `social/ig.html`, `gmb/card.html` in Spaces) and say "render from HTML templates,
+not AI photos" — see the trap in §15, which is how this went wrong on 2026-09-07.
+
 **Voice:** practical, Australian English, no hype, no emoji; admits uncertainty; reports only what
 actually happened.
 
@@ -430,6 +438,21 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
 - `hermes-agent` upgrades past `v0.19.0 (2026.7.20)` crash-loop the webui (wheel-install guard) — pin
   deliberately; deployed agent is `v2026.8.18`.
 - prod-2 load is largely hypervisor **CPU steal**, not fleet workload — removing services won't fix it.
+- **A visuals brief that says "no baked text" gets you a bare AI photo where a social card belongs**
+  (2026-09-07). The producer's hardest rule is "no text baked into the image" — correct for a
+  *photographic plate*, catastrophic when the deliverable is a *card*. Two cards whose briefs read
+  "SOCIAL images … no baked text or logos — the caption and platform carry those" shipped bare
+  Higgsfield photos to live Postiz posts; four later cards whose briefs read "RENDER FROM HTML
+  TEMPLATES, NOT AI photos" (with the template paths spelled out) rendered correctly. **The brief is
+  the whole determinant** — see §4 rule 9. Quick forensic tell: a real card is
+  `social/<slot>.png` (render-card only writes PNG); a `social/<slot>.jpg` is a resized AI plate.
+- **Counting tool use by grepping `profiles/*/logs/agent.log` does not work** — the log records tool
+  *names* and durations, never arguments. `grep -c render-card agent.log` returns 0 even on a run that
+  rendered three cards, because render-card is invoked *inside* a `terminal` call. Look at the sandbox
+  work dir (`/home/sandbox/t_<card>/`) or the artefact extension instead.
+- The producer SOUL's template step pointed at `clients/<slug>/brand/templates/`, which **has never
+  existed** — the real paths are `clients/<slug>/social/` and `clients/<slug>/gmb/`. A producer
+  following its own SOUL literally got an empty `rclone copy` and no template. Fixed 2026-09-08.
 
 ---
 
