@@ -436,10 +436,39 @@ which created job `5928f1e333cb`.
 
 Enabling `cron.allow_agent_scheduling: true` is what makes autonomous outbound email possible.
 `load_config()` is cached on the config file's `(mtime_ns, size)` and `run_job` reloads per run, so
-that edit **applies on the next tick with no restart**. Note the scope: it lets *every* cron-spawned
-agent manage the cron table. An explicit `deliver` survives a cron-context create untouched —
-`_resolve_cron_context_deliver` rewrites only `origin`/omitted, and passes `platform:…` through
-verbatim (`tools/cronjob_tools.py:454`).
+that edit **applies on the next tick with no restart**. An explicit `deliver` survives a cron-context
+create untouched — `_resolve_cron_context_deliver` rewrites only `origin`/omitted, and passes
+`platform:…` through verbatim (`tools/cronjob_tools.py:454`).
+
+**What the flag actually widens — measured, not assumed.** It grants `cronjob` and nothing else.
+`_resolve_cron_disabled_toolsets` hardcodes the other three in **both** branches:
+
+| flag | denylist for every cron-spawned agent |
+|---|---|
+| `false` (current) | `['cronjob', 'messaging', 'clarify', 'memory']` |
+| `true` | `['messaging', 'clarify', 'memory']` |
+
+Delta = **`cronjob` only**. It does *not* restore messaging, clarify or memory — a natural but wrong
+reading of the branch. And the `memory` in that list is the **local** memory toolset (one tool named
+`memory`, "personal notes + user profile"), **not** mcp-memory: `memory_search` / `memory_remember` /
+`memory_register_client` arrive via the `pm_comms` MCP server, which is enabled in cron runs and is
+not on the denylist. So **Webster's client-readiness gate is unaffected** by this flag — it works
+today and keeps working. The local `memory` tool is already unavailable in cron runs either way.
+
+**Blast radius: none, for three independent reasons.** (1) Profile configs are **standalone, not
+inherited** — `get_config_path()` resolves to `profiles/<name>/config.yaml`, a complete config with
+its own `platform_toolsets`, so setting the flag in the main file leaves each specialist's loaded
+value at `false`. (2) Only the main config lists `cronjob` in `platform_toolsets.cron`; the five
+specialist profiles omit it, so even the flag forced `true` leaves a specialist without the tool
+(verified). (3) No specialist has a cron job at all — `profiles/*/cron/jobs.json` does not exist.
+
+**Convention: set it explicitly in all six places** — `true` in the main config (Webster owns
+orchestration), and an explicit `false` in each of the five specialist profiles. Not because
+inheritance would leak it, but so nobody has to reason about precedence later: a specialist runs one
+stage and must never write the cron table. An unattended specialist creating recurring jobs is a
+failure mode to foreclose, not discover. No `cron:` section exists in the main config today, so this
+adds one; `load_config()` does `_deep_merge(DEFAULT_CONFIG, user_config)`, so a partial block keeps
+`preflight`, `wrap_response`, `script_timeout_seconds` and the other cron defaults intact.
 
 ---
 
@@ -520,8 +549,10 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
   silently dropped (§9). Fix with `hermes cron edit` (applies next tick, no restart).
 - **Webster's outbound email** — the runtime supports it (`cronjob` + `deliver="email:…"`); the gap was
   documentation, not capability. Two changes needed, neither requiring a restart: set
-  `cron.allow_agent_scheduling: true` so cron-run turns keep the `cronjob` tool, and add the outbound
-  section to his SOUL. See §11.
+  `cron.allow_agent_scheduling` explicitly in all six configs (`true` in the main config so Webster's
+  cron-run turns keep the `cronjob` tool, `false` in each of the five specialist profiles), and add
+  the outbound section to his SOUL. The flag grants `cronjob` and nothing else, and cannot reach the
+  specialists — see §11 for the measurements.
 - **Per-client WordPress** — client keys can't publish to their own sites yet; client WP publishing is
   held until wired.
 
