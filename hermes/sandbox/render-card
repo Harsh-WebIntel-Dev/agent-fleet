@@ -9,10 +9,19 @@
 #   IG 4:5  -> render-card card.html out.png 1080 1350
 #   GBP 4:3 -> render-card card.html out.png 1200 900
 #
-# The HTML's <body> should be exactly WxH (no margin) so the capture is pixel-exact. Local @font-face
-# files (from the brand kit) and remote Google Fonts both load (the sandbox has internet egress).
+# The HTML's <body> should be exactly WxH (no margin) so the capture is pixel-exact. Brand fonts resolve
+# three ways: baked into the image (Jost, Open Sans — see the Dockerfile), a local @font-face file from
+# the client's brand kit, or a remote stylesheet (the sandbox does have internet egress). Before
+# rendering, every font-family named in a LOCAL html file is checked against those routes and the render
+# is REFUSED if a family can reach none of them — a card that silently falls back to Liberation Sans
+# looks almost right and ships as a brand defect. Override with --allow-font-fallback if that is
+# genuinely what you want.
 set -eu
-IN=${1:?usage: render-card <input.html> <output.png> [width] [height] [scale]}
+
+ALLOW_FALLBACK=0
+if [ "${1:-}" = "--allow-font-fallback" ]; then ALLOW_FALLBACK=1; shift; fi
+
+IN=${1:?usage: render-card [--allow-font-fallback] <input.html> <output.png> [width] [height] [scale]}
 OUT=${2:?output.png required}
 W=${3:-1200}
 H=${4:-630}
@@ -21,6 +30,85 @@ SCALE=${5:-2}
 case "$IN" in
   http://*|https://*|file://*) URL="$IN" ;;
   *) URL="file://$(readlink -f "$IN")" ;;
+esac
+
+# --- font preflight (local files only; a remote URL's CSS isn't ours to vet) -------------------------
+case "$IN" in
+  http://*|https://*) ;;
+  *)
+    FONT_RC=0
+    python3 - "$(readlink -f "${IN#file://}")" <<'PY' || FONT_RC=$?
+import os, re, subprocess, sys
+
+path = sys.argv[1]
+html = open(path, encoding="utf-8", errors="replace").read()
+
+# Families the document actually asks for, in declaration order, first (most-preferred) name only.
+declared = []
+for decl in re.findall(r"font-family\s*:\s*([^;\"'}]*(?:'[^']*'|\"[^\"]*\")?[^;\"'}]*)", html, re.I):
+    first = decl.split(",")[0].strip().strip("'\"")
+    if first and first.lower() not in ("inherit", "initial", "unset") and first not in declared:
+        declared.append(first)
+
+
+def face_families(css):
+    return {m.strip("'\" ").lower()
+            for m in re.findall(r"@font-face[^}]*?font-family\s*:\s*([^;]+);", css, re.I | re.S)}
+
+
+# Families the document supplies itself via @font-face...
+selfhosted = face_families(html)
+
+# ...plus any it pulls from a stylesheet sitting NEXT TO it on disk. The brand card bundle keeps its
+# typefaces in a sibling `fonts.css` as woff2 data URIs, so the templates need nothing installed and
+# survive a sandbox recreate. A relative <link> that is missing from the work dir is therefore a real
+# defect, and must fall through to the refusal below rather than being treated as a font source.
+for href in re.findall(r"<link[^>]+href=[\"']([^\"':]+)[\"']", html, re.I):
+    sibling = os.path.join(os.path.dirname(os.path.abspath(path)), href)
+    if os.path.isfile(sibling):
+        try:
+            selfhosted |= face_families(open(sibling, encoding="utf-8", errors="replace").read())
+        except OSError:
+            pass
+
+has_remote_css = bool(re.search(r"<link[^>]+href=[\"']https?://[^\"']+", html, re.I))
+
+_fc_cache = {}
+
+
+def resolves_locally(fam):
+    """fc-match always answers; it's only a real hit if the family it names is the one we asked for."""
+    key = fam.lower()
+    if key not in _fc_cache:
+        try:
+            out = subprocess.run(["fc-match", "-f", "%{family}", fam],
+                                 capture_output=True, text=True, timeout=10).stdout
+            _fc_cache[key] = key in [f.strip().lower() for f in out.split(",")]
+        except Exception:
+            _fc_cache[key] = False
+    return _fc_cache[key]
+
+missing = [f for f in declared
+           if f.lower() not in selfhosted
+           and not resolves_locally(f)
+           and f.lower() not in ("arial", "sans-serif", "serif", "monospace", "helvetica")]
+
+for f in declared:
+    where = ("embedded" if f.lower() in selfhosted
+             else "system" if resolves_locally(f)
+             else "REMOTE-ONLY" if has_remote_css else "MISSING")
+    print("render-card: font %-22s %s" % (f, where), file=sys.stderr)
+
+if missing and not has_remote_css:
+    print("render-card: REFUSING — no source for font(s): %s" % ", ".join(missing), file=sys.stderr)
+    print("  Install them in the image, or add an @font-face with a local file from the brand kit.",
+          file=sys.stderr)
+    print("  Re-run with --allow-font-fallback only if a substituted font is genuinely acceptable.",
+          file=sys.stderr)
+    sys.exit(3)
+PY
+    if [ "$FONT_RC" = "3" ] && [ "$ALLOW_FALLBACK" = "0" ]; then exit 3; fi
+    ;;
 esac
 
 # --headless=old captures exactly the --window-size viewport (new headless captures full page).
