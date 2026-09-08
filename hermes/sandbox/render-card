@@ -38,9 +38,10 @@ case "$IN" in
   *)
     FONT_RC=0
     python3 - "$(readlink -f "${IN#file://}")" <<'PY' || FONT_RC=$?
-import re, subprocess, sys
+import os, re, subprocess, sys
 
-html = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+path = sys.argv[1]
+html = open(path, encoding="utf-8", errors="replace").read()
 
 # Families the document actually asks for, in declaration order, first (most-preferred) name only.
 declared = []
@@ -49,9 +50,27 @@ for decl in re.findall(r"font-family\s*:\s*([^;\"'}]*(?:'[^']*'|\"[^\"]*\")?[^;\
     if first and first.lower() not in ("inherit", "initial", "unset") and first not in declared:
         declared.append(first)
 
-# Families the document supplies itself via @font-face, and whether it pulls any remote stylesheet.
-selfhosted = {m.strip("'\" ").lower()
-              for m in re.findall(r"@font-face[^}]*?font-family\s*:\s*([^;]+);", html, re.I | re.S)}
+
+def face_families(css):
+    return {m.strip("'\" ").lower()
+            for m in re.findall(r"@font-face[^}]*?font-family\s*:\s*([^;]+);", css, re.I | re.S)}
+
+
+# Families the document supplies itself via @font-face...
+selfhosted = face_families(html)
+
+# ...plus any it pulls from a stylesheet sitting NEXT TO it on disk. The brand card bundle keeps its
+# typefaces in a sibling `fonts.css` as woff2 data URIs, so the templates need nothing installed and
+# survive a sandbox recreate. A relative <link> that is missing from the work dir is therefore a real
+# defect, and must fall through to the refusal below rather than being treated as a font source.
+for href in re.findall(r"<link[^>]+href=[\"']([^\"':]+)[\"']", html, re.I):
+    sibling = os.path.join(os.path.dirname(os.path.abspath(path)), href)
+    if os.path.isfile(sibling):
+        try:
+            selfhosted |= face_families(open(sibling, encoding="utf-8", errors="replace").read())
+        except OSError:
+            pass
+
 has_remote_css = bool(re.search(r"<link[^>]+href=[\"']https?://[^\"']+", html, re.I))
 
 _fc_cache = {}
@@ -75,7 +94,7 @@ missing = [f for f in declared
            and f.lower() not in ("arial", "sans-serif", "serif", "monospace", "helvetica")]
 
 for f in declared:
-    where = ("@font-face" if f.lower() in selfhosted
+    where = ("embedded" if f.lower() in selfhosted
              else "system" if resolves_locally(f)
              else "REMOTE-ONLY" if has_remote_css else "MISSING")
     print("render-card: font %-22s %s" % (f, where), file=sys.stderr)
