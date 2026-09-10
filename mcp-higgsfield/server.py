@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import logging
 import ipaddress
 import json
 import os
@@ -37,16 +38,31 @@ import socket
 import ssl
 import struct
 import subprocess
+import time
 import urllib.parse
 import urllib.request
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer, Context
 
+import credguard
+import refresher
+
+log = logging.getLogger("higgsfield.credguard")
+
 HIGGSFIELD_BIN = os.environ.get("HIGGSFIELD_BIN", "higgsfield")
 # Each CLI call is a quick API round-trip; keep well under the ~30s gateway timeout.
 CLI_TIMEOUT = float(os.environ.get("HIGGSFIELD_CLI_TIMEOUT", "25"))
 DEFAULT_MODEL = os.environ.get("HIGGSFIELD_DEFAULT_MODEL", "nano_banana_pro")
+# The CLI's credential dir. Every invocation is bracketed by credguard so a failed refresh can never
+# leave this dir empty (see credguard.py for the 2026-09-09 data loss this prevents).
+CRED_DIR = os.environ.get(
+    "HIGGSFIELD_CONFIG_DIR", os.path.join(os.path.expanduser("~"), ".config", "higgsfield")
+)
+CRED_SECRET_NAME = "HIGGSFIELD_CREDENTIALS_JSON"
+INFISICAL_PUSH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "infisical_push.py")
+INFISICAL_FETCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "infisical_fetch.py")
+_REFRESH_LOOP: refresher.RefreshLoop | None = None
 
 mcp = MCPServer(
     name="higgsfield",
@@ -62,10 +78,40 @@ mcp = MCPServer(
 )
 
 
-def _run(args: list[str]) -> tuple[bool, Any, str]:
-    """Run the higgsfield CLI with --json; return (ok, parsed_json_or_text, error)."""
-    if not shutil.which(HIGGSFIELD_BIN) and not os.path.exists(HIGGSFIELD_BIN):
-        return False, None, "higgsfield CLI not found in container"
+def _persist_rotated_credentials(bundle_text: str) -> None:
+    """Write a rotated bundle back to Infisical so the staged seed stops rotting.
+
+    Best-effort by contract: Higgsfield renders must not depend on the secrets store being writable.
+    """
+    try:
+        proc = subprocess.run(
+            ["python3", INFISICAL_PUSH, CRED_SECRET_NAME, "/shared"],
+            input=bundle_text, capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("rotation write-back skipped: %s", type(exc).__name__)
+        credguard.journal_rotation(CRED_DIR, persisted=False, reason=type(exc).__name__)
+        return
+    if proc.returncode == 0:
+        log.info("rotated credentials pushed back to Infisical")
+        credguard.journal_rotation(CRED_DIR, persisted=True, reason="infisical")
+    elif proc.returncode == 3:
+        # Verified 2026-09-10: Infisical answers 403 "You are not allowed to edit on secrets". Until
+        # an admin grants write, this journal + account_status's `seed_drift` are the only signals
+        # that the seed has fallen behind and the volume holds the only live copy.
+        log.warning(
+            "rotation write-back FORBIDDEN (identity lacks write scope) — the staged seed is now "
+            "STALE and this volume holds the ONLY live copy. Re-stage HIGGSFIELD_CREDENTIALS_JSON "
+            "or grant the machine identity secrets:edit on /shared."
+        )
+        credguard.journal_rotation(CRED_DIR, persisted=False, reason="forbidden")
+    else:
+        log.warning("rotation write-back failed (exit %s)", proc.returncode)
+        credguard.journal_rotation(CRED_DIR, persisted=False, reason=f"exit{proc.returncode}")
+
+
+def _invoke_cli(args: list[str]) -> tuple[bool, Any, str]:
+    """The raw CLI call. Wrapped by _run, which adds credential-loss protection."""
     try:
         proc = subprocess.run(
             [HIGGSFIELD_BIN, *args, "--json", "--no-color"],
@@ -81,6 +127,35 @@ def _run(args: list[str]) -> tuple[bool, Any, str]:
         return True, json.loads(out) if out else {}, ""
     except json.JSONDecodeError:
         return True, out, ""  # some commands print plain text; hand it back as-is
+
+
+def _run(args: list[str]) -> tuple[bool, Any, str]:
+    """Run the higgsfield CLI with --json; return (ok, parsed_json_or_text, error).
+
+    Bracketed by credguard: the vendored CLI deletes credentials.json on a failed refresh and writes
+    no replacement, so we snapshot first and atomically restore after. A rejected refresh is also
+    rewritten into an error a human can act on, instead of the CLI's misleading
+    "request failed (no response received)".
+    """
+    if not shutil.which(HIGGSFIELD_BIN) and not os.path.exists(HIGGSFIELD_BIN):
+        return False, None, "higgsfield CLI not found in container"
+
+    # The cross-process lock is held for the whole CLI call: if the CLI decides to refresh
+    # internally, it must not race our proactive refresher (Clerk revokes reused token families).
+    try:
+        with credguard.exclusive_refresh_lock(CRED_DIR):
+            (ok, data, err), restored = credguard.guarded_run(
+                CRED_DIR, lambda: _invoke_cli(args), on_rotate=_persist_rotated_credentials
+            )
+    except TimeoutError as exc:
+        return False, None, f"another Higgsfield refresh is in progress: {exc}"
+    if ok:
+        return ok, data, err
+
+    if credguard.is_auth_failure(err):
+        note = " (credentials were destroyed by the failed refresh and have been restored)" if restored else ""
+        return False, None, f"{credguard.reauth_message()}{note} CLI said: {err}"
+    return ok, data, err
 
 
 def _find_urls(obj: Any) -> list[str]:
@@ -263,14 +338,65 @@ def list_image_models(ctx: Context) -> dict[str, Any]:
 def account_status(ctx: Context) -> dict[str, Any]:
     """Health check: confirm the sidecar is authenticated and report remaining credits. Never returns tokens."""
     ok, data, err = _run(["account", "status"])
+    # Always attach the credential health block, especially on failure: the drift it reports is what
+    # silently preceded the 2026-09-09 outage for 14 days.
+    cred = _credential_health()
     if not ok:
-        return {"ok": False, "authenticated": False, "error": "account_failed", "detail": err}
+        return {"ok": False, "authenticated": False, "error": "account_failed", "detail": err,
+                "credential": cred}
     credits = email = plan = None
     if isinstance(data, dict):
         credits = data.get("credits") or data.get("balance")
         email = data.get("email")
         plan = data.get("subscription_plan_type") or data.get("plan")
-    return {"ok": True, "authenticated": True, "credits": credits, "email": email, "plan": plan}
+    return {"ok": True, "authenticated": True, "credits": credits, "email": email, "plan": plan,
+            "credential": cred}
+
+
+_DURABLE_CACHE: dict[str, Any] = {"text": None, "at": 0.0}
+DURABLE_CACHE_TTL_S = float(os.environ.get("HIGGSFIELD_DURABLE_CACHE_TTL_S", "60"))
+
+
+def _durable_seed_text() -> str | None:
+    """Fetch the CURRENT durable seed from Infisical, briefly cached.
+
+    Comparing against the boot-time env copy is not enough: that snapshot is frozen at boot, so it
+    cannot tell us whether the DURABLE store has fallen behind the live credential — which is exactly
+    the rot that went unnoticed from 26 Aug. Cached so account_status stays cheap.
+    """
+    now = time.time()
+    if _DURABLE_CACHE["text"] is not None and now - _DURABLE_CACHE["at"] < DURABLE_CACHE_TTL_S:
+        return _DURABLE_CACHE["text"]
+    try:
+        proc = subprocess.run(
+            ["python3", INFISICAL_FETCH, CRED_SECRET_NAME, "/shared"],
+            capture_output=True, text=True, timeout=10,
+        )
+        text = proc.stdout if proc.returncode == 0 and proc.stdout.strip() else None
+    except (OSError, subprocess.SubprocessError):
+        text = None
+    if text is not None:
+        _DURABLE_CACHE.update(text=text, at=now)
+    return text
+
+
+def _credential_health() -> dict[str, Any]:
+    """Credential drift report for account_status. Lengths, expiries and booleans only — no tokens.
+
+    Reports drift against BOTH the boot-time seed and the live durable store, because those answer
+    different questions: "would a restart change anything?" versus "would a re-seed actually work?".
+    """
+    report = credguard.health(CRED_DIR, os.environ.get(CRED_SECRET_NAME))
+    report.update(credguard.durable_drift(CRED_DIR, _durable_seed_text()))
+    if report.get("status") != "ok":
+        log.warning("credential health: %s — %s", report.get("status"), report.get("warning"))
+
+    loop = _REFRESH_LOOP
+    report["refresher_running"] = bool(loop and loop.is_alive())
+    if loop is not None:
+        report["refresher_last_error"] = loop.last_error
+        report["seconds_until_refresh_due"] = loop.seconds_until_due()
+    return report
 
 
 def _safe_get(url: str, headers: dict[str, str] | None = None,
@@ -343,7 +469,39 @@ def verify_url(ctx: Context, url: str, expect_text: str = "") -> dict[str, Any]:
         return {"ok": False, "live": False, "error": type(exc).__name__, "detail": str(exc)[:300]}
 
 
+def _verify_credential_with_cli() -> bool:
+    """Does the CLI accept the credential currently on disk? Used to validate a rotation."""
+    ok, _data, _err = _run(["account", "status"])
+    return ok
+
+
+def _start_refresher() -> None:
+    """Own the refresh so it happens EARLY and in exactly one place.
+
+    Left to itself the CLI refreshes only once the token is already unusable, which leaves no retry
+    budget, and it rotates where we cannot persist from. Keeping the token fresh here means the CLI
+    never reaches its own refresh path, so there is effectively a single refresher — important because
+    Clerk revokes a reused token family.
+    """
+    global _REFRESH_LOOP
+    _REFRESH_LOOP = refresher.RefreshLoop(
+        CRED_DIR, verify=_verify_credential_with_cli, persist=_persist_rotated_credentials
+    )
+    _REFRESH_LOOP.start()
+
+
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+    # Surface credential drift on every boot, so `docker logs` alone answers "is the seed still
+    # good?". Silence on that question is what let the 26-Aug seed rot unnoticed for 14 days.
+    _boot = _credential_health()
+    log.info(
+        "boot credential health: status=%s live_present=%s seed_present=%s seed_matches_live=%s "
+        "live_expires_at_utc=%s",
+        _boot.get("status"), _boot.get("live_present"), _boot.get("seed_present"),
+        _boot.get("seed_matches_live"), _boot.get("live_expires_at_utc"),
+    )
+    _start_refresher()
     mcp.run(transport="streamable-http", host="0.0.0.0",
             port=int(os.environ.get("PORT", "8080")), streamable_http_path="/mcp",
             stateless_http=True)

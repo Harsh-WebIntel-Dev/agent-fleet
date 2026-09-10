@@ -1,31 +1,39 @@
 #!/usr/bin/env bash
-# Seed Higgsfield credentials ONCE from the Coolify secret onto the persisted volume, then hand the file
-# to the CLI which owns refresh from there. We never overwrite an existing file: after first boot the CLI
-# rotates the access token in place, and clobbering it with the (now stale) seed would break auth.
+# Bring up the Higgsfield credential, then hand off to the MCP server.
+#
+# Higgsfield auth is a ROTATING OAuth pair (Clerk: ~24h access token — MEASURED 2026-09-10 — and a new
+# refresh_token on every exchange). The live bundle therefore diverges from the staged seed as soon as
+# it rotates, and the volume is the only place it lives.
+#
+# Credential SELECTION lives in bootstrap.py (unit-tested) rather than in this shell script: the rule
+# is "newest expires_at wins" across {volume, snapshot, seed}, which both protects a rotated token
+# from a stale seed and lets a human recover by re-staging a fresh one. A previous "never clobber"
+# rule silently kept a dead bundle when a fresh seed was staged.
 set -euo pipefail
-CFG="${HOME:-/root}/.config/higgsfield"
+CFG="${HIGGSFIELD_CONFIG_DIR:-${HOME:-/root}/.config/higgsfield}"
+export HIGGSFIELD_CONFIG_DIR="$CFG"
 mkdir -p "$CFG"
-# Pull the credential from Infisical (the fleet's source of truth) when reachable; fall back to the
-# Coolify env / the persisted volume if Infisical is down — a fail-safe so an Infisical outage can
-# never brick this service at boot.
+
+# Pull the seed from Infisical (the fleet's source of truth) when reachable, else fall back to the
+# Coolify env — fail-safe, so an Infisical outage can never brick this service at boot.
+#
+# NOTE: this is a BOOT-ONLY pull. A secret re-staged in Infisical is not picked up until a restart —
+# the same trap that made Mailchimp look unwired for six days.
 if [ -n "${INFISICAL_CLIENT_ID:-}" ]; then
   if _pulled="$(python3 /app/infisical_fetch.py HIGGSFIELD_CREDENTIALS_JSON /shared 2>/dev/null)" && [ -n "$_pulled" ]; then
-    HIGGSFIELD_CREDENTIALS_JSON="$_pulled"
+    export HIGGSFIELD_CREDENTIALS_JSON="$_pulled"
     echo "[entrypoint] pulled HIGGSFIELD_CREDENTIALS_JSON from Infisical"
   else
-    echo "[entrypoint] Infisical unavailable — using env/volume fallback" >&2
+    echo "[entrypoint] Infisical unavailable — falling back to the Coolify env seed" >&2
   fi
 fi
-if [ ! -f "$CFG/credentials.json" ] && [ -n "${HIGGSFIELD_CREDENTIALS_JSON:-}" ]; then
-  printf '%s' "$HIGGSFIELD_CREDENTIALS_JSON" > "$CFG/credentials.json"
-  chmod 600 "$CFG/credentials.json"
-  echo "[entrypoint] seeded credentials.json from HIGGSFIELD_CREDENTIALS_JSON"
-fi
-if [ ! -f "$CFG/config.json" ] && [ -n "${HIGGSFIELD_WORKSPACE_ID:-}" ]; then
+
+if [ -n "${HIGGSFIELD_WORKSPACE_ID:-}" ] && [ ! -f "$CFG/config.json" ]; then
   printf '{"workspace_id":"%s"}' "$HIGGSFIELD_WORKSPACE_ID" > "$CFG/config.json"
   echo "[entrypoint] wrote config.json (workspace_id)"
 fi
-if [ ! -f "$CFG/credentials.json" ]; then
-  echo "[entrypoint] WARNING: no credentials.json — set HIGGSFIELD_CREDENTIALS_JSON (from 'higgsfield auth login')." >&2
-fi
+
+# Clears orphaned locks, then installs whichever of {volume, snapshot, seed} has the latest expiry.
+python3 /app/bootstrap.py
+
 exec python3 /app/server.py

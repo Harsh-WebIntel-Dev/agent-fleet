@@ -287,13 +287,106 @@ All agents reach tools through the litellm **aggregated `/mcp/`** endpoint (Herm
 | **lnkbio** | sidecar `mcp-lnkbio` | **`wi_tools`** | `lnkbio_list`, `lnkbio_set_link` | **WI-only**; rolling top-5 (adds a link, drops the oldest) |
 | **mailchimp** | sidecar `mcp-mailchimp` (node) | **`wi_tools`** | 17 **draft-only**: `create_campaign`, `update_campaign`, `set_campaign_content`, `send_test_email`, `list_audiences/templates/campaigns`, … | send/schedule/delete withheld at the gateway; **blocked on the Infisical key** |
 | **wordpress** | sidecar `mcp-wordpress` | `fleet_tools` | `wp_create_draft`, `wp_update_post`, `wp_get_post`, `wp_publish`, `wp_upload_media`, `wp_list_categories`, `account_status` | content-bot role; **WI site only** (not per-client yet) |
-| **higgsfield** | sidecar `mcp-higgsfield` | `fleet_tools` | `create_image_job`, `get_image_job`, `list_image_models`, `verify_url`, `account_status` | async: `create_image_job` → poll `get_image_job` |
+| **higgsfield** | sidecar `mcp-higgsfield` | `fleet_tools` | `create_image_job`, `get_image_job`, `list_image_models`, `verify_url`, `account_status` | async: `create_image_job` → poll `get_image_job`. **Auth is a rotating OAuth pair — see below** |
 | **spaces** | sidecar `mcp-spaces` → **R2** | `fleet_tools` | `spaces_list`, `spaces_read`, `spaces_write`, `spaces_ingest_url`, `spaces_presign`, `spaces_delete` | asset store, bucket `fleet-clients` (see §6 Cloudflare) |
 | **memory** | sidecar `mcp-memory` | `fleet_tools` | `memory_remember`, `memory_search`, `memory_stats`, `memory_register_client` | pgvector, per-client RLS + per-agent (§8) |
 
 **Not in the registry:** Firecrawl is a Hermes **plugin** (`web/firecrawl`), not a litellm MCP;
 `mcp-a2a` (`ask_pm`/`create_pm_task`/`notify_client_hermes`) and `mcp-social-extras` are
 **OpenClaw-era / legacy** (superseded by `postiz_extras` + `lnkbio`; the a2a Coolify service is exited).
+
+### ⚠️ Higgsfield auth: a rotating OAuth pair whose only live copy is one Docker volume
+
+Higgsfield has **no API key**. Auth is OAuth 2.0 PKCE against **Clerk** (`clerk.higgsfield.ai`, public
+client `sRGCQJvvJkPrrtRj`, scopes `email profile offline_access user:org:read`). The access token lives
+**~24 hours** (86,400s — MEASURED 2026-09-10 from a freshly issued credential; the 7200s in a Clerk
+doc example is not this deployment), and Clerk returns a **new `refresh_token` on every exchange**. The vendored
+`@higgsfield/cli` binary owns that refresh and writes the result **only** to
+`/root/.config/higgsfield/credentials.json` on the named volume
+`…_higgsfield-config`. Consequences, all verified 2026-09-10:
+
+- **That volume is the single live copy of a credential that rotates daily.** Lose it and auth is
+  gone — there is no other current copy anywhere.
+- **The staged seed rots at the first rotation after capture.** `HIGGSFIELD_CREDENTIALS_JSON` (Infisical `/shared`,
+  mirrored in the Coolify env) is only a *first-boot* seed. The 26-Aug seed was replayed on 2026-09-10
+  and Clerk answered **`invalid_grant`** — "the refresh token is malformed or not valid". A restart
+  re-seeds the file happily and the very next call still fails.
+- **There is no headless recovery.** `higgsfield auth login` needs a real browser plus a
+  `localhost:8765` callback, so re-auth is a **human, interactive** act. The CLI's canned hint
+  "Run: `hf auth login`" is misleading twice over: the binary is `higgsfield` (the `hf` build is
+  vendored at `…/@higgsfield/cli/vendor/hf`, not on `$PATH`), and it cannot run in this headless
+  container at all.
+- **A rejected refresh reads like a network fault.** The CLI reports it as
+  `request failed (no response received)`. Egress, DNS and Cloudflare were all verified healthy while
+  that error was being returned — treat this string as **dead credentials**, not a blip. (Cloudflare
+  does 403 the token endpoint for bot-ish user agents such as `Python-urllib`, but it passes
+  `higgsfield-cli/*` and `Go-http-client/*`, so it is not the cause.)
+- **Never run the CLI against a second copy of the bundle in parallel** (e.g. keeping a laptop login
+  alive after transplanting its credentials). Rotation plus reuse detection can revoke the whole token
+  family.
+
+**Durability guard + health signal (deployed 2026-09-10, `mcp-higgsfield:0.3.0`).** The vendored CLI
+deletes `credentials.json` on every failed refresh, so `credguard.py` brackets each invocation:
+snapshot → run → atomic restore from `credentials.json.prev`, all writes temp+fsync+rename, stale
+`*.lock` cleared on boot and after a destructive failure, and CLI calls serialised in-process (two
+parallel refreshes could trip Clerk's reuse detection). Boot precedence is **usable live bundle >
+`.prev` snapshot (rotated, newer) > staged seed**.
+
+Because the rot was *silent* for 14 days, **`account_status` now returns a `credential` block** —
+`status` (`ok` / `seed_drift` / `no_seed` / `no_credentials`), `seed_matches_live`, and both expiries,
+as lengths/timestamps/booleans only (never a token). The same line is logged on every boot, so
+`docker logs` alone answers "is the seed still good?". `seed_drift` means the live token has rotated
+away from the seed and the volume is the only live copy. `rotation.log` on the volume records each
+rotation and whether it persisted (bounded to 100 lines). Note an expired *access* token is normal
+between calls and is reported but never alarmed on.
+
+**Rotation is ours, proactive, and single-flight (`refresher.py`, deployed 2026-09-10).** Left alone
+the CLI refreshes only once the token is already unusable — no retry budget — and rotates where we
+cannot persist from. So the sidecar performs the `refresh_token` grant itself:
+
+- **Proactive:** fires with **8h of the 24h token still to run** (`HIGGSFIELD_REFRESH_LEAD_S`, checked
+  every 15m), so a bad hour is survivable. Because the token never nears expiry the CLI never reaches
+  its own refresh path — which also means there is effectively one refresher.
+- **Verified + reversible:** the new bundle is installed atomically, then validated with a real CLI
+  call, and rolled back if the CLI rejects it.
+- **Exactly one refresher, structurally:** `credguard.exclusive_refresh_lock()` is a real **flock** on
+  the volume, so exclusion holds across processes *and* containers, not just threads (re-entrant per
+  thread, because verification calls the CLI from inside the lock). A test forks a second process to
+  prove it. **Never run `higgsfield` against this account anywhere else** — Clerk applies reuse
+  detection and can revoke the whole token family, the most likely cause of the 26-Aug death.
+- **CONFIRMED by a live rotation 2026-09-10:** the `refresh_token` really does change on every
+  exchange (`3cf0199e…` → `57d740d9…`) and the new TTL was **86,396s = 24.00h**.
+
+### What actually protects the Higgsfield credential TODAY
+
+> **The durable copy is a HOST BACKUP, not Infisical.** Rotation cannot reach Infisical — write is
+> denied (§16) — so as of 2026-09-11 the only off-volume copy lives at
+> **`/home/harsh/higgsfield-cred/` on prod-2** (`latest.json` plus the last 10
+> `credentials-<UTC>.json` generations, dir `0700`, files `0600`), refreshed by a **`*/10` host cron**
+> running `/home/harsh/higgsfield-cred-backup.sh` (source:
+> `mcp-higgsfield/ops/higgsfield-cred-backup.sh`). History is in
+> `/home/harsh/higgsfield-cred/backup.log`.
+>
+> **If the volume is lost, recover from there** — copy `latest.json` into the volume as
+> `credentials.json` (mode 600) and restart, or stage its contents as
+> `HIGGSFIELD_CREDENTIALS_JSON` and restart. Do NOT reach for the Infisical seed or the Coolify env
+> var: both are stale and will replay as `invalid_grant`.
+>
+> `account_status.durable_recoverable` reports `false` precisely because Infisical is stale, and the
+> `seed_drift` warning fires on every render. That is accurate and will keep firing until the grant in
+> §16 is created. It is **not** telling you the credential is unprotected — the host backup is what
+> protects it — only that the *secrets store* could not re-seed it.
+
+The host tier survives container recreate, image rebuild and `docker volume rm` — the same tier
+CLAUDE.md already trusts for `/home/harsh/litellm-cfg/`. **Deliberately not R2/mcp-spaces:** that
+bucket is agent-readable via `spaces_read`, so a live refresh_token there would be exposed to the
+whole fleet. Remove the cron with `crontab -l | grep -v higgsfield-cred-backup | crontab -`.
+
+**Boot selection is "newest `expires_at` wins"** across {volume, snapshot, seed} (`bootstrap.py`,
+unit-tested). The earlier "never clobber" rule caused a real miss: a human staged a fresh credential
+and, because the dead 26-Aug bundle still *parsed*, boot kept the dead one and the redeploy silently
+changed nothing. Newest-wins still protects a rotated token from a stale seed **and** lets a human
+recover by re-staging. Note the Infisical pull is **boot-only** — a re-staged secret needs a restart.
 
 ### Sidecar build pattern
 
@@ -430,6 +523,16 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
 - `hermes-agent` upgrades past `v0.19.0 (2026.7.20)` crash-loop the webui (wheel-install guard) — pin
   deliberately; deployed agent is `v2026.8.18`.
 - prod-2 load is largely hypervisor **CPU steal**, not fleet workload — removing services won't fix it.
+- Higgsfield auth is a **rotating** OAuth pair living only on one Docker volume, and the vendored CLI
+  **deletes `credentials.json` on every failed refresh** without writing a replacement (durable data
+  loss; reproduced deterministically 2026-09-10). The staged seed goes stale at the first rotation, so a
+  restart cannot recover it — re-auth is human-only. See §7.
+- **A `docker cp` hot-patch survives `docker restart` but NOT a Coolify redeploy**, and Coolify pins the
+  image tag in its OWN compose — which can drift from `mcp-higgsfield/compose.yml` and even point at a
+  tag that no longer exists on the host (it pinned `0.2.0` after that tag was gone, 2026-09-10). Verify
+  with `docker inspect <c> --format '{{.Config.Image}}'` + `docker diff <c> | grep /app`: source files
+  showing as `A`/`C` mean the fix is in a container layer only. Fix = bake an image, update the Coolify
+  service's compose tag, redeploy.
 
 ---
 
@@ -441,6 +544,49 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
   SMTP creds are loaded.
 - **Per-client WordPress** — client keys can't publish to their own sites yet; client WP publishing is
   held until wired.
+- **Higgsfield auth: RESTORED 2026-09-10 01:13 UTC.** A human re-authenticated and staged a fresh
+  bundle in Infisical `/shared`; `account_status` returns `authenticated: true` (plan `ultra`,
+  account `accounts@webintelligenz.com`). The durability guard + proactive refresher
+  (`mcp-higgsfield:0.3.0`) were deployed **before** that credential was taken up, so it has been
+  protected from the moment it landed. **Note the Coolify env copy of
+  `HIGGSFIELD_CREDENTIALS_JSON` is still the DEAD 26-Aug bundle** — it is only the boot fallback for
+  when Infisical is unreachable, but as it stands that fallback would install a dead credential.
+  Worth updating or removing.
+- **Higgsfield rotation write-back needs ONE Infisical grant.** Verified twice (2026-09-10) by an
+  idempotent self-write — fetch `/shared/HIGGSFIELD_CREDENTIALS_JSON` and PATCH the identical value
+  back — which returns
+  `403 {"message":"You are not allowed to edit on secrets","error":"PermissionDenied"}`. So
+  `fleet-hermes` cannot **edit** an existing secret either, not just create one (§6 recorded only the
+  create limitation). **Exact grant required:**
+
+  | | |
+  |---|---|
+  | Identity | **`fleet-hermes`** — identity id `36c2c698-69d2-40a2-b702-ecbe3db7b7d9`, Universal Auth clientId `e18237e2-80dd-45d2-aa6f-fd21aad16b1b` (different ids — the clientId is not the identity id) |
+  | Project | `c48654fa-8af5-47d0-ba2d-a57cdbee9d0e` (org `2281e115-5a8c-4c90-ba1a-d86646f5fe4a`) |
+  | Environment | `prod` |
+  | Secret | `/shared` → `HIGGSFIELD_CREDENTIALS_JSON` |
+  | Permission | **`secrets:edit`** — "modify existing secret values". **`edit` is a DISTINCT action from `create`** (secrets actions are `read`/`describeSecret`/`readValue`/`create`/`edit`/`delete`), so read access does not imply it and create access would not cover it. |
+  | Current role | `viewer` (read-only: "can't create, edit, or delete any resources") |
+  | How | **Change that membership from `viewer` to `member` (Developer)** — Access Control → Identities. ⚠️ A path-scoped custom role is **NOT available on this instance**: the org plan reports `rbac: false` (custom roles are an Enterprise feature), so `member` is the only route, and it grants read+write on **all** secrets in this project, not just this key. To get least privilege instead, move this credential into its own Infisical project and repoint `INFISICAL_PROJECT_ID` — that is a config change, not just a grant. |
+
+  The push code is already deployed and **self-activating**: it starts working the moment the grant
+  lands, with no code change or redeploy. Until then rotation cannot reach Infisical, so
+  `account_status.durable_recoverable` is `false` and the **host-cron backup in §7 is the only
+  off-volume copy**.
+- **Proposed, NOT created — a credential monitor cron.** Silence is what cost 14 days. Suggested
+  Hermes cron (the fleet can now send outbound email; every entry in a comma list needs its own
+  `email:` prefix):
+
+  ```
+  cronjob(action="create", schedule="0 8 * * *",
+          deliver="email:harsh@webintelligenz.com,email:technology@webintelligenz.com",
+          prompt="Call higgsfield account_status. Report ONLY if action is needed: "
+                 "authenticated is not true, credential.status is not ok, "
+                 "credential.durable_recoverable is false, or live_expires_at_utc is under 12h away. "
+                 "Include the expiry, status and durable_recoverable. Never print a token.")
+  ```
+
+  Daily at 08:00 Melbourne suits a 24h token. Ask before creating it — it is a fleet cron.
 
 ---
 

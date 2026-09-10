@@ -7,7 +7,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip3 install --break-system-packages --no-cache-dir -r requirements.txt
-COPY server.py entrypoint.sh infisical_fetch.py ./
+COPY server.py credguard.py refresher.py bootstrap.py entrypoint.sh infisical_fetch.py infisical_push.py ./
 RUN chmod +x entrypoint.sh
 EXPOSE 8080
 ENTRYPOINT ["/app/entrypoint.sh"]

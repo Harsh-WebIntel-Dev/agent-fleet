@@ -1,0 +1,11 @@
+=== what Infisical holds NOW (metadata only) ===
+  File "<string>", line 3
+    raw=open(/tmp/_s).read()
+             ^
+SyntaxError: invalid syntax
+
+=== env seed (boot-time copy, expected STALE) vs disk ===
+  File "<string>", line 4
+    print(ENV expires:,datetime.datetime.fromtimestamp(e[expires_at],datetime.timezone.utc).isoformat(),sha:,hashlib.sha256(os.environ[HIGGSFIELD_CREDENTIALS_JSON].encode()).hexdigest()[:12])
+          ^^^^^^^^^^^
+SyntaxError: invalid syntax. Perhaps you forgot a comma?
