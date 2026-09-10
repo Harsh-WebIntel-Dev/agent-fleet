@@ -539,11 +539,13 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
 
   | | |
   |---|---|
-  | Identity | the machine identity in `INFISICAL_CLIENT_ID` on `mcp-higgsfield` (`fleet-hermes`, Universal Auth) |
-  | Project | `INFISICAL_PROJECT_ID` |
+  | Identity | **`fleet-hermes`** — identity id `36c2c698-69d2-40a2-b702-ecbe3db7b7d9`, Universal Auth clientId `e18237e2-80dd-45d2-aa6f-fd21aad16b1b` (different ids — the clientId is not the identity id) |
+  | Project | `c48654fa-8af5-47d0-ba2d-a57cdbee9d0e` (org `2281e115-5a8c-4c90-ba1a-d86646f5fe4a`) |
   | Environment | `prod` |
-  | Secret path | `/shared` — ideally scoped to just `HIGGSFIELD_CREDENTIALS_JSON` |
-  | Permission | **`secrets:edit`** (add `secrets:create` only if you want it to create the key too) |
+  | Secret | `/shared` → `HIGGSFIELD_CREDENTIALS_JSON` |
+  | Permission | **`secrets:edit`** — "modify existing secret values". **`edit` is a DISTINCT action from `create`** (secrets actions are `read`/`describeSecret`/`readValue`/`create`/`edit`/`delete`), so read access does not imply it and create access would not cover it. |
+  | Current role | `viewer` (read-only: "can't create, edit, or delete any resources") |
+  | How | **Change that membership from `viewer` to `member` (Developer)** — Access Control → Identities. ⚠️ A path-scoped custom role is **NOT available on this instance**: the org plan reports `rbac: false` (custom roles are an Enterprise feature), so `member` is the only route, and it grants read+write on **all** secrets in this project, not just this key. To get least privilege instead, move this credential into its own Infisical project and repoint `INFISICAL_PROJECT_ID` — that is a config change, not just a grant. |
 
   The push code is already deployed and **self-activating**: it starts working the moment the grant
   lands, with no code change or redeploy. Until then rotation cannot reach Infisical, so
