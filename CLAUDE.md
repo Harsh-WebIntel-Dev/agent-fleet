@@ -1,7 +1,7 @@
 # CLAUDE.md — Agent Fleet
 
 Guidance for Claude Code (and humans) working in this repo. This documents the **current, deployed**
-system as of **2026-09-03**. Where an older subfolder README disagrees (e.g. `hermes/README.md` still
+system as of **2026-09-10** (read-only audit of prod-2 that day). Where an older subfolder README disagrees (e.g. `hermes/README.md` still
 describes an "OpenClaw does the work" model), **this file is the authority** — the live system is the
 Hermes-native fleet below.
 
@@ -45,9 +45,16 @@ mechanism*, never the individual task.
 - **Host:** prod-2 `46.250.245.204`, SSH alias **`webintelligenz-prod-2`** (user `harsh`, in `docker`
   group → `docker` works without sudo; root login is not key-authorized). Managed by **Coolify**.
 - **Containers** (share the `hermes-home` volume at `/home/hermes/.hermes`):
-  - `hermes-agent-zhvjhbo5752ovx1nl2rk9v30` — agent + in-process cron scheduler (the "gateway").
-  - `hermes-webui-zhvjhbo5752ovx1nl2rk9v30` — web UI (front-end only, no scheduler).
-  - `hermes-sandbox` — the **isolated** terminal/code sandbox (see §12).
+  - `hermes-agent-zhvjhbo5752ovx1nl2rk9v30` — agent + in-process cron scheduler (the "gateway") **and**,
+    since 2026-09-04, the dashboard / Hermes-Desktop backend on **`100.115.104.5:18795`** (tailnet-only,
+    basic-auth: `/` → 302 `/login`, every `/api/*` except `/api/health` → 401 without credentials) plus
+    A2A on **`100.115.104.5:18794`** (bearer; unauthenticated POST → 401; `tailscale serve` HTTPS
+    `…ts.net:8447` fronts it). `traefik.enable=false`.
+  - There is **no `hermes-webui` container any more** (removed 2026-09-04, image gone from the host).
+    Coolify still holds `hermes-webui` and `hermes-serve` application records in `exited` state under
+    service `hermes-agent-for-webintelligenz`, which is why Coolify reports the service
+    `degraded:unhealthy` while `docker` reports the agent healthy.
+  - `hermes-sandbox` — the terminal/code sandbox (see §12).
 - **Hermes CLI:** **`/opt/hermes/.venv/bin/hermes`** inside `hermes-agent` (NOT on `$PATH`; `tirith`
   in `~/.hermes/bin` is a shell-security guard, not the CLI).
   ```bash
@@ -58,8 +65,9 @@ mechanism*, never the individual task.
   `config.yaml`, `cron/jobs.json`. **SOULs are read per-turn — edit live, no restart.** The deployed
   SOULs are the **source of truth**; `hermes/souls/*.SOUL.md` in this repo are original templates that
   **drift** — always read the live file first and keep a dated `.bak-*`.
-- **Webui (public):** `https://wi-agent.widev.com.au` — password-only, internet-facing; blast radius
-  bounded by per-client budget-capped keys.
+- **No public webui.** `https://wi-agent.widev.com.au` still resolves and Traefik still holds the
+  router (the Coolify `hermes-webui` record keeps the FQDN) but it answers **503** — nothing is behind
+  it. The only operator UI is the tailnet dashboard slot above.
 
 ---
 
@@ -122,6 +130,10 @@ Intelligenz's own work uses the default (`litellm` key — omit `provider`). Nev
 one silently mis-bills another client). **WordPress is NOT yet per-client** — the shared WP connects
 only to webintelligenz.com, so a client's WP *publishing* is held until per-client WP is wired
 (everything else — writing, images, social, SEO, research — bills the client key fine).
+**Live caveat (2026-09-10):** the `LITELLM_KEY_BIOGONE` / `_PRIDE_ADVICE` / `_RADIANCE_WEALTH` env
+vars are **not set** on the `hermes-agent` container, so `provider="litellm-<slug>"` has no key to
+resolve; every card on the board so far (91 active) has `tenant` and `provider_override` null, and all
+spend lands on the `hermes-webintelligenz` key (the Pride Advice Fathers' Day cards included).
 
 **3 — Compose → dispatch.** He builds a dependency-chained set of kanban cards (only the stages the
 task needs), each carrying the ClickUp `task_id`, a stage brief in his words, and "read the task +
@@ -185,13 +197,13 @@ actually happened.
 | `mcp-memory/` | Vectorised fleet memory (Postgres+pgvector, per-client RLS, per-agent) | current |
 | `mcp-postiz-extras/` | Postiz mgmt the built-in MCP lacks (`postiz_list/delete/set_status/edit`) | current |
 | `mcp-lnkbio/` | Lnk.Bio link-in-bio (rolling top-5), WI-only | current |
-| `mcp-mailchimp/` | Mailchimp newsletter drafts (draft-only, WI-only) — **blocked on Infisical key** | current |
+| `mcp-mailchimp/` | Mailchimp newsletter drafts (draft-only, WI-only) — key staged in Infisical 2026-09-07; Coolify service **stopped by hand** (`exited`) since 2026-09-08 | current, stopped |
 | `mcp-higgsfield/` | Higgsfield image/video generation | current |
 | `mcp-wordpress/` | Custom `wp-json` WordPress sidecar (7 tools) | current |
 | `mcp-spaces/` | R2 / DO Spaces asset store (ingest/presign/read/write) | current |
 | `mcp-a2a/` | Agent-to-agent comms (`ask_pm`/`create_pm_task`) | OpenClaw-era, mostly legacy |
 | `mcp-social-extras/` | older social helper | legacy |
-| `firecrawl/` (+ `searxng/`) | self-hosted **Firecrawl** (runs with **SearXNG** + Redis) — the fleet's web-crawl/search backend, reached via the Hermes `web/firecrawl` plugin | current (infra) |
+| `firecrawl/` (+ `searxng/`) | self-hosted **Firecrawl** (runs with **SearXNG** + Redis + RabbitMQ + nuq-postgres) — the fleet's web-crawl/search backend, reached via the Hermes `web/firecrawl` plugin. Its containers carry Coolify names (`api-da1g1lpeilodrfywwglgasgf`, `searxng-…`, `rabbitmq-…`), not "firecrawl" | current (infra) — **API down, see §7** |
 | `clickup-bridge/`, `clickup-sweep/` | OpenClaw-era ClickUp intake (`bridge.js`/`sweep.js`) | **superseded** by Hermes crons |
 | `openclaw/`, `nemoclaw/`, `plan/` | earlier builds + planning | **superseded** / reference |
 
@@ -201,8 +213,8 @@ actually happened.
 
 ### LiteLLM gateway (models, keys, tools)
 
-- Coolify service `fleet-core-litellm` (`v10up2yg1cwxo0k1ks9j2qro`). Image
-  `ghcr.io/berriai/litellm:main-stable` wrapped by **`litellm-wrapper/`** — a fail-safe entrypoint
+- Coolify service `fleet-core-litellm` (`v10up2yg1cwxo0k1ks9j2qro`). Running image **`litellm-fleet:1`**
+  = `ghcr.io/berriai/litellm:main-stable` wrapped by **`litellm-wrapper/`** — a fail-safe entrypoint
   that at boot pulls its provider keys, tool tokens, and `LITELLM_MASTER_KEY` from **Infisical
   `/shared`** (`DEEPSEEK_API_KEY`, `DO_INFERENCE_KEY`, `SEMRUSH_API_KEY`, `POSTIZ_MCP_TOKEN`,
   `CLICKUP_MCP_TOKEN`), falling back to the Coolify env if Infisical is unreachable (never blocks boot).
@@ -216,9 +228,10 @@ actually happened.
     uses this key, so WI-only scoping (lnkbio, mailchimp) is **SOUL policy**, not a hard boundary.
   - **3 client keys** (biogone / pride-advice / radiance-wealth) grant by explicit **server-ID list**
     → must be updated per new server; the TEAM must allow a server before a key can.
-- **Models** (`model_aliases` + LiteLLM routing): Webster converses on **`flash`** (deepseek-v4-flash,
-  ~16× cheaper) — high-turn/low-depth; specialist/deep work uses higher tiers (`standard` → DeepSeek
-  V4 Pro). DeepSeek-direct via the deepseek key; other models via DigitalOcean GenAI
+- **Models** (`model_aliases` + LiteLLM routing): Webster **and all five specialists run on `standard`**
+  (`model.default: standard`, `provider: litellm` in `config.yaml` and every `profiles/*/config.yaml`;
+  `standard` → DeepSeek V4 Pro). `flash` (deepseek-v4-flash, ~16× cheaper) is offered by the provider
+  but is **nobody's default** — the "Webster converses on flash" design was never applied live. DeepSeek-direct via the deepseek key; other models via DigitalOcean GenAI
   (`inference.do-ai.run`, `DO_INFERENCE_KEY`) — premium tiers can be 403 tier-gated. **Vision** for all
   agents is a LiteLLM `vision` alias (→ DO llama-4-maverick), wired via `auxiliary.vision` in
   `config.yaml`. **Embeddings** = `embed` alias (bge-m3, 1024-dim) used by mcp-memory. Tiers seen:
@@ -266,8 +279,9 @@ redis + a **tailscale-proxy** sidecar). **Tailnet-only — not internet-facing.*
   secrets it needs at boot; if Infisical is down it falls back to the Coolify env and boots anyway.
   Coolify is **not** a sync target — Infisical never pushes.
 - **Gotchas:** a `SITE_URL`/HTTPS misconfig blocks machine-identity creation; the `fleet-hermes`
-  identity is **read-only Viewer** (can't stage NEW secrets — which is why the Mailchimp key is
-  currently blocked; staging needs an admin token).
+  identity is **read-only Viewer** — it can neither create nor **edit** secrets (a self-write returns
+  `403 You are not allowed to edit on secrets`). That is why Higgsfield credential rotation cannot
+  persist itself to Infisical (§16). Staging or granting `secrets:edit` needs an admin token.
 
 ---
 
@@ -282,16 +296,24 @@ All agents reach tools through the litellm **aggregated `/mcp/`** endpoint (Herm
 |---|---|---|---|---|
 | **clickup** | external `mcp.clickup.com` | `fleet_internal` | full ClickUp: tasks, lists, comments, chat, docs, time | **no** tool restriction → the whole toolset (that's why Webster can list tasks + DM) |
 | **semrush** | external `mcp.semrush.com/v2` | `fleet_tools` | keyword / backlink / organic / competitor / site-audit research | header auth (`SEMRUSH_API_KEY_HEADER`) |
-| **postiz** | self-hosted `postiz.widev.com.au` | `fleet_tools` | `integrationSchedulePostTool`, `integrationList`, `groupList`, `integrationSchema`, `triggerTool`, `generateImage/VideoTool`, `uploadFromUrlTool` | social + Google Business Profile; 10-tool allow-list (excludes `ask_postiz`) |
+| **postiz** | self-hosted `postiz.widev.com.au` | `fleet_tools` | `integrationSchedulePostTool`, `integrationList`, `groupList`, `integrationSchema`, `triggerTool`, `generateImage/VideoTool`, `uploadFromUrlTool` | social + Google Business Profile; 10-tool allow-list (excludes `ask_postiz`). **Live 2026-09-11: publishing is dead.** Last `PUBLISHED` post 2026-09-06 20:00 Melbourne; 14 posts dated 07–10 Sep still `QUEUE` (0 `ERROR`). The publisher is the pm2-managed **`orchestrator`** (Temporal worker) inside the `postiz-…` container: OOM-killed in the 07–08 Sep memory exhaustion (`exited with code [137]`, 2026-09-07 17:18Z, pm2 ↺14), the restart came up hung — no listener on `:3002`, no log output since, and Temporal task queue `main` shows a 35-workflow backlog aged ~3 days with **zero pollers**. The Docker healthcheck only probes the frontend `:5000`, so Docker/Coolify report `healthy`. Repair owned by AO worker agent-fleet-21 (`postiz-orchestrator`). |
 | **postiz_extras** | sidecar `mcp-postiz-extras` | `fleet_tools` | `postiz_list`, `postiz_delete`, `postiz_set_status`, `postiz_edit` | fills gaps the built-in Postiz MCP lacks; delete-500 = success; 15-min past-slot guard on edit |
 | **lnkbio** | sidecar `mcp-lnkbio` | **`wi_tools`** | `lnkbio_list`, `lnkbio_set_link` | **WI-only**; rolling top-5 (adds a link, drops the oldest) |
-| **mailchimp** | sidecar `mcp-mailchimp` (node) | **`wi_tools`** | 17 **draft-only**: `create_campaign`, `update_campaign`, `set_campaign_content`, `send_test_email`, `list_audiences/templates/campaigns`, … | send/schedule/delete withheld at the gateway; **blocked on the Infisical key** |
+| **mailchimp** | sidecar `mcp-mailchimp` (node) | **`wi_tools`** | 17 **draft-only**: `create_campaign`, `update_campaign`, `set_campaign_content`, `send_test_email`, `list_audiences/templates/campaigns`, … | send/schedule/delete withheld at the gateway; key staged 2026-09-07 and the tools were used that day. Container **stopped by hand** since 2026-09-08 (`NODE_OPTIONS=--unhandled-rejections=warn` is set on the Coolify service); while stopped LiteLLM logs `MCPServerListError … 'mailchimp'` on every discovery (~50/h) and the aggregate is **110** tools, not 128 |
 | **wordpress** | sidecar `mcp-wordpress` | `fleet_tools` | `wp_create_draft`, `wp_update_post`, `wp_get_post`, `wp_publish`, `wp_upload_media`, `wp_list_categories`, `account_status` | content-bot role; **WI site only** (not per-client yet) |
-| **higgsfield** | sidecar `mcp-higgsfield` | `fleet_tools` | `create_image_job`, `get_image_job`, `list_image_models`, `verify_url`, `account_status` | async: `create_image_job` → poll `get_image_job` |
+| **higgsfield** | sidecar `mcp-higgsfield` | `fleet_tools` | `create_image_job`, `get_image_job`, `list_image_models`, `verify_url`, `account_status` | async: `create_image_job` → poll `get_image_job`. `account_status` also reports credential health (`status: ok\|seed_drift`, expiry, `refresher_running`). **Deployment caveat:** the durability code (`credguard.py`, `infisical_push.py`, `refresher.py`, `bootstrap.py`) lives in the **running container's writable layer** (`docker diff`), not in the image Coolify would redeploy — and the tag Coolify's record names (`mcp-higgsfield:0.2.0`) **no longer exists** on the host |
 | **spaces** | sidecar `mcp-spaces` → **R2** | `fleet_tools` | `spaces_list`, `spaces_read`, `spaces_write`, `spaces_ingest_url`, `spaces_presign`, `spaces_delete` | asset store, bucket `fleet-clients` (see §6 Cloudflare) |
 | **memory** | sidecar `mcp-memory` | `fleet_tools` | `memory_remember`, `memory_search`, `memory_stats`, `memory_register_client` | pgvector, per-client RLS + per-agent (§8) |
 
-**Not in the registry:** Firecrawl is a Hermes **plugin** (`web/firecrawl`), not a litellm MCP;
+**Not in the registry:** Firecrawl is a Hermes **plugin** (`web/firecrawl`), not a litellm MCP.
+**Live 2026-09-10 — the Firecrawl API is down.** `http://api-da1g1lpeilodrfywwglgasgf:3002` refuses
+connections from `hermes-agent` (nothing listens on 3002 inside the container; only the queue-worker
+is alive). Root cause: the stack's `REDIS_URL` host is the bare name `redis`, and on the shared
+`coolify` network (IPv6-enabled) that name resolves AAAA-first to **`coolify-redis`** (alias `redis`,
+`--requirepass`), so the worker loops on `NOAUTH Authentication required` (~17k lines/h; 26.7k of the
+container's 120k log lines). With `web/ddgs` disabled there is **no fallback** — `web_extract` /
+`web_search` fail for every agent (`HTTPConnectionPool(host='api-…', port=3002)`); the semrush feed
+cron only survives by fetching through the sandbox terminal.
 `mcp-a2a` (`ask_pm`/`create_pm_task`/`notify_client_hermes`) and `mcp-social-extras` are
 **OpenClaw-era / legacy** (superseded by `postiz_extras` + `lnkbio`; the a2a Coolify service is exited).
 
@@ -314,7 +336,7 @@ webintelligenz`, plus `postiz`, `n8n`, `metabase`, and the `elmo*` trackers.
 Several are **multi-container stacks**: `fleet-core-litellm` (+ Postgres + tailscale-proxy),
 `fleet-core-infisical` (+ Postgres/Redis/tailscale-proxy), `firecrawl` (+ SearXNG + Redis), and the
 self-hosted `postiz` (+ a full **Temporal** stack: temporal/ui/postgresql/elasticsearch + Redis —
-Postiz's scheduler; upgrading Postiz is not a tag bump). `n8n`/`metabase`/`elmo*` belong to the
+Postiz's scheduler; upgrading Postiz is not a tag bump). **Container-naming trap:** Coolify names stack members `<compose-service>-<service-uuid>`, so nothing in `docker ps` says "firecrawl" — the stack is `api-`, `nuq-postgres-`, `playwright-service-`, `rabbitmq-`, `redis-`, `searxng-da1g1lpeilodrfywwglgasgf` — and a grep for `postiz` finds one of seven: the stack is `postiz-`, `postgres-`, `redis-`, `temporal-`, `temporal-ui-`, `temporal-postgresql-`, `temporal-elasticsearch-hooyxybihdd13t7g2nfovaw1`. Filter by suffix, not by product name. `n8n`/`metabase`/`elmo*` belong to the
 separate dashboard/AI-visibility projects on the same box, not the fleet core.
 
 ---
@@ -346,15 +368,15 @@ The in-process scheduler runs in `hermes-agent`; jobs in `cron/jobs.json`; manag
 | `marketing-task-sweep` | `12b1e0f820e9` | 15m | **MCP-only** (no gate): Webster lists his actionable ClickUp tasks himself and composes/reviews. |
 | `clickup-chat-intake` | `f3d04e2607f5` | 5m | `monitor_chat.py` gate → reads the changed channel; DM = answer all, group = only if @tagged. |
 | `semrush-blog-global-feed` | `21cb02f87693` | 07:00 | Ingest SEMrush blog → global memory + Spaces `clients/global/semrush-feed.md`. |
-| `review-notify` | `415989b00956` | 15m | Emails reviewers "ready for review". **Currently failing** ("email has no gateway credentials") — email platform is enabled but the cron's `deliver: email` SMTP creds are not loaded; verify before relying on it. |
+| `review-notify` | `415989b00956` | 15m | `monitor_review.py` gate → emails reviewers "ready for review". `deliver` = `email:<addr>` on **all four** reviewer entries (prefix fixed 2026-09-07). **Intermittent, not dead:** it delivers when the email adapter is connected (2026-09-09 16:22 — all four `delivered … via live adapter`), and the same job is `BLOCKED by pre-dispatch config validation — 'email' has no gateway credentials` whenever the adapter's IMAP fetch has just timed out (`email_imap_fetch_failed`, ~8×/day in `errors.log`). |
 
 **Monitor-gate pattern:** a job may name a `monitor_script`/`monitor_url`; Hermes runs it each tick and
 wakes the LLM only when its output hash **changes**. The task-sweep deliberately has **no** gate; the
 chat intake keeps its gate because it does real channel-routing, not just cost-gating.
 
 **⚠️ Cron traps:** (a) a killed/`timeout`-wrapped `hermes cron run` can baseline-without-processing and
-stick "no change" — never wrap it in `timeout`. (b) A cron's first tick fired inside the webui session
-that created it records a **false** `failed` ledger status — re-run it standalone with `hermes cron run
+stick "no change" — never wrap it in `timeout`. (b) A cron's first tick fired inside the UI session
+(formerly the webui, now the dashboard) that created it records a **false** `failed` ledger status — re-run it standalone with `hermes cron run
 <id>` to prove/reset.
 
 ---
@@ -384,11 +406,18 @@ must be **self-contained** (fired crons are isolated turns): who (name+uid), whe
 
 ## 12. Sandbox (terminal / code isolation)
 
-Terminal + code_execution run via `terminal.backend: ssh` into **`hermes-sandbox`** — off the prod
-network, no secrets, non-root `sandbox` user. Image bakes chromium, `render-card` (HTML→PNG),
-`qa-shot`, Pillow, rclone, tzdata. `setup-sandbox.sh` provisions it and **wires the network link (step
-4) — re-run it after any Webster redeploy** (a `docker restart` keeps the link; a redeploy/recreate
-drops it). Never connect the webui to the sandbox's own network (breaks Traefik → webui outage).
+Terminal + code_execution run via `terminal.backend: ssh` into **`hermes-sandbox`** — non-root
+`sandbox` user, 2 GiB memory cap, on its own `hermes-sandbox` network plus the agent's Coolify service
+network (**not** the shared `coolify` network). It is *not* air-gapped: it **has internet egress**
+(HTTP 200 to public sites) and holds **one** credential — the bucket-scoped, IP-filtered R2 rclone
+token at `/home/sandbox/.config/rclone/rclone.conf` (run `rclone` as `-u sandbox`; as root it finds no
+config). Image `hermes-sandbox:2` (2026-08-31) bakes chromium, `render-card` (HTML→PNG), `qa-shot`,
+Pillow, rclone, tzdata. **Not baked:** the Jost + Open Sans brand fonts and the font-preflight
+`render-card` (2026-09-08) exist only in the running container's writable layer (`docker diff
+hermes-sandbox`) — a recreate loses them; the baked rebuild is PR #15 (`hermes/sandbox/REBUILD-RUNBOOK.md`).
+`setup-sandbox.sh` provisions it and **wires the network link (step 4) — re-run it after any Webster
+redeploy** (a `docker restart` keeps the link; a redeploy/recreate drops it). Never attach a
+Traefik-fronted container to the sandbox's own network (that is what broke the old webui).
 
 ---
 
@@ -397,9 +426,10 @@ drops it). Never connect the webui to the sandbox's own network (breaks Traefik 
 - **SOUL edits:** read the **live** file, keep a dated `.bak-*`, edit, stream back as `hermes`, `diff`.
   Read per-turn → **no restart**.
 - **MCP tool / `config.yaml` / model changes:** clear `cache/mcp_schema_cache.json` +
-  `tool_discovery_cache.json` (main **and** `profiles/*/cache/`) and **restart both** hermes containers
-  — each process caches tool schemas independently.
-- **Restart vs redeploy:** `docker restart -t 30 <agent> <webui>` preserves volumes + the sandbox link;
+  `tool_discovery_cache.json` (main **and** `profiles/*/cache/`) and **restart the `hermes-agent`
+  container** — there has been a single Hermes process since 2026-09-04 (the "restart both" rule only
+  returns if a second container is ever re-added).
+- **Restart vs redeploy:** `docker restart -t 30 <agent>` preserves volumes + the sandbox link;
   a Coolify **redeploy recreates** the container → drops the sandbox link (re-run `setup-sandbox.sh`).
   Restart only in a **quiet window** (`hermes cron runs` shows nothing in-flight).
 - **Hard rules:** explain state-changing actions **before** doing them; never touch a running process
@@ -420,25 +450,64 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
 ## 15. Known traps (index)
 
 - LiteLLM `POST /v1/mcp/server` is destructive (nulls fields); no PATCH → edit config + DELETE + restart.
-- Two Hermes processes cache MCP schemas independently → clear both caches + restart both for tool changes.
+- (Historical — one container since 2026-09-04) two Hermes processes cache MCP schemas independently →
+  if a webui/serve container is ever re-added, clear both caches + restart both for tool changes.
+- The shared `coolify` network is IPv6-enabled and `coolify-redis` carries the alias **`redis`** on it —
+  any stack that joins that network and names its Redis `redis` (Firecrawl does) resolves to Coolify's
+  password-protected Redis and dies on `NOAUTH`.
+- `mcp-higgsfield` runs hot-patched code (container layer only) from an image tag that no longer exists
+  — a Coolify redeploy/recreate reverts or fails the sidecar; merge + build + deploy PR #16 first.
+- Coolify's `hermes-agent-for-webintelligenz` service still lists `hermes-webui` and `hermes-serve` as
+  members (`exited`) → a Coolify-level restart/redeploy may resurrect a second gateway on the shared
+  `hermes-home` volume (the email/A2A hijack) and a port-18795 clash. Prefer `docker restart` on the
+  agent container until those records are removed.
 - Sandbox network link is not Coolify-managed → re-run `setup-sandbox.sh` after a redeploy.
 - Never wrap `hermes cron run` in `timeout` (baselines-without-processing → stuck "no change"); a
-  cron's first tick inside its creating webui session logs a **false** `failed`.
+  cron's first tick inside its creating UI session logs a **false** `failed`.
 - Memory global recall needs `across_agents=True` (per-agent scoping by default).
 - Postiz `delete` returns 500-means-success and removes only the Postiz record, not the live post; a
   recreate at a slot already passed publishes a **duplicate** (postiz-extras has a 15-min past-slot guard).
-- `hermes-agent` upgrades past `v0.19.0 (2026.7.20)` crash-loop the webui (wheel-install guard) — pin
-  deliberately; deployed agent is `v2026.8.18`.
-- prod-2 load is largely hypervisor **CPU steal**, not fleet workload — removing services won't fix it.
+- (Obsolete since 2026-09-04 — no webui container) `hermes-agent` past `v0.19.0 (2026.7.20)`
+  crash-looped the *webui* (wheel-install guard). Deployed agent is `v2026.8.18` = `v0.20.4`; keep the pin deliberate.
+- prod-2 load is largely hypervisor **CPU steal** (`vmstat` `st` 27–61 % on 2026-09-10), not fleet
+  workload — removing services won't fix it. **But** 2026-09-07/08 was a genuine memory exhaustion
+  (swap full, load 273) with **three independent production casualties**: the Postiz `orchestrator`
+  was OOM-killed and came back hung (publishing dead since 06 Sep — §7), `temporal-elasticsearch`
+  restarted 16×, and the Higgsfield credential refresh stalled in the same window (per agent-fleet-1/19).
+  Also that day: `hermes-agent` + `hermes-sandbox` carry `OOMKilled=true`, the gateway process restarted
+  8×, LiteLLM 11×, Infisical 23× (cumulative), firecrawl's rabbitmq went unhealthy for 3 days. Watch
+  `free -m`, not just load.
+- A container's `healthy` only means its healthcheck passed — Postiz's checks the frontend `:5000`, not
+  the pm2 `orchestrator` that actually publishes. `docker exec postiz-… pm2 list` (restart count ↺,
+  RSS) and `temporal task-queue describe --task-queue main` (pollers) are the real signals.
+- Temporal's CLI inside `temporal-hooyx…` binds the container IP, not loopback: pass
+  `--address 10.0.12.7:7233` (or the current IP) or every command is a false "connection refused".
 
 ---
 
 ## 16. Open items
 
-- **Mailchimp key** — MCP built/wired/scoped (draft-only, WI-only) but **blocked** on staging
-  `MAILCHIMP_API_KEY` into Infisical `/shared` (needs an admin token).
-- **review-notify email delivery** — failing ("no gateway credentials"); verify the email platform's
-  SMTP creds are loaded.
+- **Postiz publishing outage (CRITICAL)** — orchestrator hung since 2026-09-07 17:18Z, 14 posts queued
+  for 07–10 Sep never went out (§7). Repair owned by agent-fleet-21; after it, add an orchestrator-aware
+  healthcheck (`:3002` or pm2 status) so a hung worker cannot sit behind a `healthy` container again.
+- **Mailchimp** — key staged 2026-09-07 and working; the container is **stopped by hand**. Decide:
+  restart it, or drop it from `mcp_servers` in `litellm-cfg/config.yaml` so LiteLLM stops logging
+  `MCPServerListError` on every discovery.
+- **review-notify** — intermittent: blocked on the ticks where the email adapter's IMAP fetch has timed
+  out (§9). Root cause is the adapter's IMAP reliability, not missing SMTP creds.
+- **Higgsfield Infisical grant** — `fleet-hermes` needs `secrets:edit` on `/shared` so token rotation
+  persists; until then the container volume `gtjymgp2unprqsjd82i0o328_higgsfield-config` and the
+  10-minute host backup `~/higgsfield-cred/` (cron on prod-2) are the only live copies (`seed_drift`
+  + `durable_recoverable=false` firing). Also make the 0.3.0 code a real deployed image (PR #16).
+- **Firecrawl API down** — `redis` alias collision on the `coolify` network (§7); fix the stack's
+  `REDIS_URL` host (use the Coolify-suffixed container name) or detach it from the shared network.
+- **Sandbox image rebuild** — bake fonts + preflight `render-card` (PR #15); R2 template swap to the
+  self-contained font bundle still pending (R2 `fb.html` still pulls `fonts.googleapis.com`).
+- **Webster outbound-email SOUL patch** — not applied; its md5 guard (`a5c7d3bb…`) no longer matches the
+  live SOUL (`8e0a5f30…` after the 2026-09-08 social-card edit). Re-base before applying.
+- **Board hygiene** — three abandoned Health Clinics chains (original, `v2`, `[clean]`: 10 cards in
+  `triage`/`todo` since 2026-09-07) sit beside the finished `[rebuild]` chain; two 2026-08-26 cards
+  carry the force-complete signature (`done` with `session_id` and `result` null).
 - **Per-client WordPress** — client keys can't publish to their own sites yet; client WP publishing is
   held until wired.
 
