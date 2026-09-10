@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import logging
 import ipaddress
 import json
 import os
@@ -43,10 +44,21 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer, Context
 
+import credguard
+
+log = logging.getLogger("higgsfield.credguard")
+
 HIGGSFIELD_BIN = os.environ.get("HIGGSFIELD_BIN", "higgsfield")
 # Each CLI call is a quick API round-trip; keep well under the ~30s gateway timeout.
 CLI_TIMEOUT = float(os.environ.get("HIGGSFIELD_CLI_TIMEOUT", "25"))
 DEFAULT_MODEL = os.environ.get("HIGGSFIELD_DEFAULT_MODEL", "nano_banana_pro")
+# The CLI's credential dir. Every invocation is bracketed by credguard so a failed refresh can never
+# leave this dir empty (see credguard.py for the 2026-09-09 data loss this prevents).
+CRED_DIR = os.environ.get(
+    "HIGGSFIELD_CONFIG_DIR", os.path.join(os.path.expanduser("~"), ".config", "higgsfield")
+)
+CRED_SECRET_NAME = "HIGGSFIELD_CREDENTIALS_JSON"
+INFISICAL_PUSH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "infisical_push.py")
 
 mcp = MCPServer(
     name="higgsfield",
@@ -62,10 +74,33 @@ mcp = MCPServer(
 )
 
 
-def _run(args: list[str]) -> tuple[bool, Any, str]:
-    """Run the higgsfield CLI with --json; return (ok, parsed_json_or_text, error)."""
-    if not shutil.which(HIGGSFIELD_BIN) and not os.path.exists(HIGGSFIELD_BIN):
-        return False, None, "higgsfield CLI not found in container"
+def _persist_rotated_credentials(bundle_text: str) -> None:
+    """Write a rotated bundle back to Infisical so the staged seed stops rotting.
+
+    Best-effort by contract: Higgsfield renders must not depend on the secrets store being writable.
+    """
+    try:
+        proc = subprocess.run(
+            ["python3", INFISICAL_PUSH, CRED_SECRET_NAME, "/shared"],
+            input=bundle_text, capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("rotation write-back skipped: %s", type(exc).__name__)
+        return
+    if proc.returncode == 0:
+        log.info("rotated credentials pushed back to Infisical")
+    elif proc.returncode == 3:
+        # Documented, expected on a read-only Viewer identity. Say so once, plainly, and move on.
+        log.warning(
+            "rotation write-back FORBIDDEN (identity lacks write scope) — the staged seed will "
+            "stay stale; the live bundle exists ONLY on this volume"
+        )
+    else:
+        log.warning("rotation write-back failed (exit %s)", proc.returncode)
+
+
+def _invoke_cli(args: list[str]) -> tuple[bool, Any, str]:
+    """The raw CLI call. Wrapped by _run, which adds credential-loss protection."""
     try:
         proc = subprocess.run(
             [HIGGSFIELD_BIN, *args, "--json", "--no-color"],
@@ -81,6 +116,29 @@ def _run(args: list[str]) -> tuple[bool, Any, str]:
         return True, json.loads(out) if out else {}, ""
     except json.JSONDecodeError:
         return True, out, ""  # some commands print plain text; hand it back as-is
+
+
+def _run(args: list[str]) -> tuple[bool, Any, str]:
+    """Run the higgsfield CLI with --json; return (ok, parsed_json_or_text, error).
+
+    Bracketed by credguard: the vendored CLI deletes credentials.json on a failed refresh and writes
+    no replacement, so we snapshot first and atomically restore after. A rejected refresh is also
+    rewritten into an error a human can act on, instead of the CLI's misleading
+    "request failed (no response received)".
+    """
+    if not shutil.which(HIGGSFIELD_BIN) and not os.path.exists(HIGGSFIELD_BIN):
+        return False, None, "higgsfield CLI not found in container"
+
+    (ok, data, err), restored = credguard.guarded_run(
+        CRED_DIR, lambda: _invoke_cli(args), on_rotate=_persist_rotated_credentials
+    )
+    if ok:
+        return ok, data, err
+
+    if credguard.is_auth_failure(err):
+        note = " (credentials were destroyed by the failed refresh and have been restored)" if restored else ""
+        return False, None, f"{credguard.reauth_message()}{note} CLI said: {err}"
+    return ok, data, err
 
 
 def _find_urls(obj: Any) -> list[str]:

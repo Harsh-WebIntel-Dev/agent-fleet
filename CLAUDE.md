@@ -287,13 +287,42 @@ All agents reach tools through the litellm **aggregated `/mcp/`** endpoint (Herm
 | **lnkbio** | sidecar `mcp-lnkbio` | **`wi_tools`** | `lnkbio_list`, `lnkbio_set_link` | **WI-only**; rolling top-5 (adds a link, drops the oldest) |
 | **mailchimp** | sidecar `mcp-mailchimp` (node) | **`wi_tools`** | 17 **draft-only**: `create_campaign`, `update_campaign`, `set_campaign_content`, `send_test_email`, `list_audiences/templates/campaigns`, … | send/schedule/delete withheld at the gateway; **blocked on the Infisical key** |
 | **wordpress** | sidecar `mcp-wordpress` | `fleet_tools` | `wp_create_draft`, `wp_update_post`, `wp_get_post`, `wp_publish`, `wp_upload_media`, `wp_list_categories`, `account_status` | content-bot role; **WI site only** (not per-client yet) |
-| **higgsfield** | sidecar `mcp-higgsfield` | `fleet_tools` | `create_image_job`, `get_image_job`, `list_image_models`, `verify_url`, `account_status` | async: `create_image_job` → poll `get_image_job` |
+| **higgsfield** | sidecar `mcp-higgsfield` | `fleet_tools` | `create_image_job`, `get_image_job`, `list_image_models`, `verify_url`, `account_status` | async: `create_image_job` → poll `get_image_job`. **Auth is a rotating OAuth pair — see below** |
 | **spaces** | sidecar `mcp-spaces` → **R2** | `fleet_tools` | `spaces_list`, `spaces_read`, `spaces_write`, `spaces_ingest_url`, `spaces_presign`, `spaces_delete` | asset store, bucket `fleet-clients` (see §6 Cloudflare) |
 | **memory** | sidecar `mcp-memory` | `fleet_tools` | `memory_remember`, `memory_search`, `memory_stats`, `memory_register_client` | pgvector, per-client RLS + per-agent (§8) |
 
 **Not in the registry:** Firecrawl is a Hermes **plugin** (`web/firecrawl`), not a litellm MCP;
 `mcp-a2a` (`ask_pm`/`create_pm_task`/`notify_client_hermes`) and `mcp-social-extras` are
 **OpenClaw-era / legacy** (superseded by `postiz_extras` + `lnkbio`; the a2a Coolify service is exited).
+
+### ⚠️ Higgsfield auth: a rotating OAuth pair whose only live copy is one Docker volume
+
+Higgsfield has **no API key**. Auth is OAuth 2.0 PKCE against **Clerk** (`clerk.higgsfield.ai`, public
+client `sRGCQJvvJkPrrtRj`, scopes `email profile offline_access user:org:read`). The access token lives
+**2 hours**, and Clerk returns a **new `refresh_token` on every exchange**. The vendored
+`@higgsfield/cli` binary owns that refresh and writes the result **only** to
+`/root/.config/higgsfield/credentials.json` on the named volume
+`…_higgsfield-config`. Consequences, all verified 2026-09-10:
+
+- **That volume is the single live copy of a credential that changes every ~2h.** Lose it and auth is
+  gone — there is no other current copy anywhere.
+- **The staged seed rots within ~2h of capture.** `HIGGSFIELD_CREDENTIALS_JSON` (Infisical `/shared`,
+  mirrored in the Coolify env) is only a *first-boot* seed. The 26-Aug seed was replayed on 2026-09-10
+  and Clerk answered **`invalid_grant`** — "the refresh token is malformed or not valid". A restart
+  re-seeds the file happily and the very next call still fails.
+- **There is no headless recovery.** `higgsfield auth login` needs a real browser plus a
+  `localhost:8765` callback, so re-auth is a **human, interactive** act. The CLI's canned hint
+  "Run: `hf auth login`" is misleading twice over: the binary is `higgsfield` (the `hf` build is
+  vendored at `…/@higgsfield/cli/vendor/hf`, not on `$PATH`), and it cannot run in this headless
+  container at all.
+- **A rejected refresh reads like a network fault.** The CLI reports it as
+  `request failed (no response received)`. Egress, DNS and Cloudflare were all verified healthy while
+  that error was being returned — treat this string as **dead credentials**, not a blip. (Cloudflare
+  does 403 the token endpoint for bot-ish user agents such as `Python-urllib`, but it passes
+  `higgsfield-cli/*` and `Go-http-client/*`, so it is not the cause.)
+- **Never run the CLI against a second copy of the bundle in parallel** (e.g. keeping a laptop login
+  alive after transplanting its credentials). Rotation plus reuse detection can revoke the whole token
+  family.
 
 ### Sidecar build pattern
 
@@ -430,6 +459,10 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
 - `hermes-agent` upgrades past `v0.19.0 (2026.7.20)` crash-loop the webui (wheel-install guard) — pin
   deliberately; deployed agent is `v2026.8.18`.
 - prod-2 load is largely hypervisor **CPU steal**, not fleet workload — removing services won't fix it.
+- Higgsfield auth is a **rotating** OAuth pair living only on one Docker volume, and the vendored CLI
+  **deletes `credentials.json` on every failed refresh** without writing a replacement (durable data
+  loss; reproduced deterministically 2026-09-10). The staged seed is stale ~2h after capture, so a
+  restart cannot recover it — re-auth is human-only. See §7.
 
 ---
 
@@ -441,6 +474,18 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
   SMTP creds are loaded.
 - **Per-client WordPress** — client keys can't publish to their own sites yet; client WP publishing is
   held until wired.
+- **Higgsfield auth is DOWN and needs a human** (since 2026-09-09 23:47 UTC / 09:47 AEST). A failed
+  refresh destroyed the only live credential copy; the staged seed replays as Clerk `invalid_grant`.
+  Recovery is interactive and cannot be automated: run `higgsfield auth login` in a browser
+  (`npm i -g @higgsfield/cli@1.1.23`), then re-stage the resulting `~/.config/higgsfield/credentials.json`
+  **whole** as `HIGGSFIELD_CREDENTIALS_JSON` in Infisical `/shared` and restart `mcp-higgsfield`. Stop
+  using the CLI on that machine afterwards (parallel refresh can revoke the token family). Producer
+  image renders fail until then; `render-card` HTML→PNG cards are unaffected. See §7 and §15.
+- **Higgsfield rotation write-back permission** — the durability fix pushes each rotated bundle back to
+  Infisical so the seed stops rotting, but per §6 the `fleet-hermes` identity is a read-only Viewer.
+  Whether it may *update* an existing secret (a different permission from creating one) is
+  **unverified**; the push is fail-safe and logs `FORBIDDEN` if not. Confirm, and grant write on just
+  `/shared/HIGGSFIELD_CREDENTIALS_JSON` if needed — otherwise the volume stays a single point of loss.
 
 ---
 
