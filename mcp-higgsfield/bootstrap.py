@@ -18,7 +18,6 @@ That protects a rotated token (it is newer than the seed) AND lets a human recov
 from __future__ import annotations
 
 import datetime
-import glob
 import json
 import os
 import sys
@@ -61,15 +60,24 @@ def _read(path: str) -> str | None:
 
 
 def clear_boot_locks(cfg_dir: str) -> list[str]:
-    """At boot nothing can legitimately hold a lock, so drop them all and say which."""
+    """Clear the VENDOR's orphaned lock only.
+
+    The CLI treats the mere existence of `credentials.json.lock` as the lock, so an orphaned one
+    blocks every retry forever and must go — that is what stuck on 2026-09-09.
+
+    We deliberately do NOT touch our own `refresh.lock`. That is an flock file: the lock lives in the
+    kernel, not in the file, so removing it achieves nothing useful and is actively harmful — if
+    another process still holds the inode, a newcomer would create a FRESH inode and take an
+    INDEPENDENT lock, giving us the two concurrent refreshers the lock exists to prevent.
+    """
     cleared = []
-    for path in glob.glob(os.path.join(cfg_dir, "*.lock")):
-        try:
-            size = os.path.getsize(path)
-            os.unlink(path)
-            cleared.append(f"{os.path.basename(path)} ({size}b)")
-        except OSError:
-            pass
+    path = os.path.join(cfg_dir, credguard.LOCK_NAME)
+    try:
+        size = os.path.getsize(path)
+        os.unlink(path)
+        cleared.append(f"{os.path.basename(path)} ({size}b)")
+    except OSError:
+        pass
     return cleared
 
 

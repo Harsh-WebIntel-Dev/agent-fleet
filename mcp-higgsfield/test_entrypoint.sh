@@ -94,10 +94,12 @@ OUT="$(run_boot "$D" "$GOOD")"
 check "installs the fresh seed instead of keeping the dead bundle" "$([ "$(refresh_token_of "$D/credentials.json")" = "live-token" ] && echo 1)"
 check "reports installing from the seed" "$(echo "$OUT" | grep -q 'installed credential from seed' && echo 1)"
 
-echo "9. the refresh lock is also cleared at boot"
-D="$(mktemp -d)"; printf '%s' "$GOOD" > "$D/credentials.json"; echo "pid=999 since=0" > "$D/refresh.lock"
+echo "9. boot clears the VENDOR lock but leaves our flock file alone"
+D="$(mktemp -d)"; printf '%s' "$GOOD" > "$D/credentials.json"
+: > "$D/credentials.json.lock"; echo "pid=999 since=0" > "$D/refresh.lock"
 OUT="$(run_boot "$D" "$SEED")"
-check "stale refresh.lock removed" "$([ ! -e "$D/refresh.lock" ] && echo 1)"
+check "vendor lock removed" "$([ ! -e "$D/credentials.json.lock" ] && echo 1)"
+check "our flock file preserved (removing it would allow a 2nd refresher)" "$([ -e "$D/refresh.lock" ] && echo 1)"
 
 echo
 echo "passed=$PASS failed=$FAIL"

@@ -123,16 +123,18 @@ def test_bootstrap_replaces_a_zero_byte_stub(cfg):
     assert (cfg / "credentials.json").stat().st_size > 0
 
 
-def test_bootstrap_clears_every_lock_including_the_refresh_lock(cfg):
+def test_bootstrap_clears_the_vendor_lock_but_never_our_flock_file(cfg):
+    """Removing refresh.lock would let a newcomer take an INDEPENDENT flock on a fresh inode while
+    another process still holds the old one — two refreshers, which is what the lock prevents."""
     (cfg / "credentials.json").write_text(json.dumps(FRESH))
     (cfg / credguard.LOCK_NAME).write_bytes(b"")
     (cfg / credguard.REFRESH_LOCK_NAME).write_text("pid=999 since=0")
 
     out = bootstrap.bootstrap(str(cfg), None)
 
-    assert len(out["cleared_locks"]) == 2
+    assert out["cleared_locks"] == [f"{credguard.LOCK_NAME} (0b)"]
     assert not (cfg / credguard.LOCK_NAME).exists()
-    assert not (cfg / credguard.REFRESH_LOCK_NAME).exists()
+    assert (cfg / credguard.REFRESH_LOCK_NAME).exists()
 
 
 def test_bootstrap_reports_no_source_when_nothing_is_usable(cfg):
