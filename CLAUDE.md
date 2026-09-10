@@ -325,7 +325,7 @@ doc example is not this deployment), and Clerk returns a **new `refresh_token` o
   alive after transplanting its credentials). Rotation plus reuse detection can revoke the whole token
   family.
 
-**Durability guard + health signal (deployed 2026-09-10, `mcp-higgsfield:0.2.2`).** The vendored CLI
+**Durability guard + health signal (deployed 2026-09-10, `mcp-higgsfield:0.3.0`).** The vendored CLI
 deletes `credentials.json` on every failed refresh, so `credguard.py` brackets each invocation:
 snapshot → run → atomic restore from `credentials.json.prev`, all writes temp+fsync+rename, stale
 `*.lock` cleared on boot and after a destructive failure, and CLI calls serialised in-process (two
@@ -339,6 +339,38 @@ as lengths/timestamps/booleans only (never a token). The same line is logged on 
 away from the seed and the volume is the only live copy. `rotation.log` on the volume records each
 rotation and whether it persisted (bounded to 100 lines). Note an expired *access* token is normal
 between calls and is reported but never alarmed on.
+
+**Rotation is ours, proactive, and single-flight (`refresher.py`, deployed 2026-09-10).** Left alone
+the CLI refreshes only once the token is already unusable — no retry budget — and rotates where we
+cannot persist from. So the sidecar performs the `refresh_token` grant itself:
+
+- **Proactive:** fires with **8h of the 24h token still to run** (`HIGGSFIELD_REFRESH_LEAD_S`, checked
+  every 15m), so a bad hour is survivable. Because the token never nears expiry the CLI never reaches
+  its own refresh path — which also means there is effectively one refresher.
+- **Verified + reversible:** the new bundle is installed atomically, then validated with a real CLI
+  call, and rolled back if the CLI rejects it.
+- **Exactly one refresher, structurally:** `credguard.exclusive_refresh_lock()` is a real **flock** on
+  the volume, so exclusion holds across processes *and* containers, not just threads (re-entrant per
+  thread, because verification calls the CLI from inside the lock). A test forks a second process to
+  prove it. **Never run `higgsfield` against this account anywhere else** — Clerk applies reuse
+  detection and can revoke the whole token family, the most likely cause of the 26-Aug death.
+- **CONFIRMED by a live rotation 2026-09-10:** the `refresh_token` really does change on every
+  exchange (`3cf0199e…` → `57d740d9…`) and the new TTL was **86,396s = 24.00h**.
+
+**Off-volume persistence — blocked on one grant, with an interim.** Infisical is the intended target
+and the push is deployed and self-activating, but write is denied (§16). Interim:
+`mcp-higgsfield/ops/higgsfield-cred-backup.sh`, on a **`*/10` host cron**, copies the live bundle to
+`/home/harsh/higgsfield-cred/` (dir `0700`, files `0600`, bounded generations, writes only on change,
+never logs a token). The host survives container recreate, image rebuild and `docker volume rm` — the
+same tier CLAUDE.md already trusts for `/home/harsh/litellm-cfg/`. **Deliberately not R2/mcp-spaces:**
+that bucket is agent-readable via `spaces_read`, so a live refresh_token there would be exposed to the
+whole fleet. Remove with `crontab -l | grep -v higgsfield-cred-backup | crontab -`.
+
+**Boot selection is "newest `expires_at` wins"** across {volume, snapshot, seed} (`bootstrap.py`,
+unit-tested). The earlier "never clobber" rule caused a real miss: a human staged a fresh credential
+and, because the dead 26-Aug bundle still *parsed*, boot kept the dead one and the redeploy silently
+changed nothing. Newest-wins still protects a rotated token from a stale seed **and** lets a human
+recover by re-staging. Note the Infisical pull is **boot-only** — a re-staged secret needs a restart.
 
 ### Sidecar build pattern
 
@@ -490,27 +522,47 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
   SMTP creds are loaded.
 - **Per-client WordPress** — client keys can't publish to their own sites yet; client WP publishing is
   held until wired.
-- **Higgsfield auth is DOWN and needs a human** (since 2026-09-09 23:47 UTC / 09:47 AEST). A failed
-  refresh destroyed the only live credential copy; the staged seed replays as Clerk `invalid_grant`.
-  Recovery is interactive and cannot be automated: run `higgsfield auth login` in a browser
-  (`npm i -g @higgsfield/cli@1.1.23`), then re-stage the resulting `~/.config/higgsfield/credentials.json`
-  **whole** as `HIGGSFIELD_CREDENTIALS_JSON` in Infisical `/shared` and restart `mcp-higgsfield`. Stop
-  using the CLI on that machine afterwards (parallel refresh can revoke the token family). Producer
-  image renders fail until then; `render-card` HTML→PNG cards are unaffected. See §7 and §15.
-  **The durability guard is already deployed** (2026-09-10, image `mcp-higgsfield:0.2.2`, also tagged
-  `0.2.1`; rollback image `mcp-higgsfield:0.2.1-bak-20260910`), so the credential obtained by that
-  re-auth is protected from the moment it lands. **Deploy order matters: fix first, then re-auth** —
-  re-authenticating into the old sidecar would put a fresh token straight back in the same trap.
-- **Higgsfield rotation write-back is BLOCKED on one Infisical permission** (verified 2026-09-10, not a
-  guess). An idempotent self-write — fetch `/shared/HIGGSFIELD_CREDENTIALS_JSON` and PATCH the
-  identical value straight back — returns
+- **Higgsfield auth: RESTORED 2026-09-10 01:13 UTC.** A human re-authenticated and staged a fresh
+  bundle in Infisical `/shared`; `account_status` returns `authenticated: true` (plan `ultra`,
+  account `accounts@webintelligenz.com`). The durability guard + proactive refresher
+  (`mcp-higgsfield:0.3.0`) were deployed **before** that credential was taken up, so it has been
+  protected from the moment it landed. **Note the Coolify env copy of
+  `HIGGSFIELD_CREDENTIALS_JSON` is still the DEAD 26-Aug bundle** — it is only the boot fallback for
+  when Infisical is unreachable, but as it stands that fallback would install a dead credential.
+  Worth updating or removing.
+- **Higgsfield rotation write-back needs ONE Infisical grant.** Verified twice (2026-09-10) by an
+  idempotent self-write — fetch `/shared/HIGGSFIELD_CREDENTIALS_JSON` and PATCH the identical value
+  back — which returns
   `403 {"message":"You are not allowed to edit on secrets","error":"PermissionDenied"}`. So
-  `fleet-hermes` cannot **edit** an existing secret either, not just create one (§6 previously only
-  recorded the create limitation). **Remedy: grant that identity `secrets:edit` on `/shared`** (ideally
-  scoped to that one key). The push code is already deployed and self-activating — it starts working
-  the moment the grant lands, no code change or redeploy needed. Until then rotation cannot persist
-  off-volume, so **that one Docker volume remains a single point of loss**; the drift is at least no
-  longer silent (see the health signal in §7).
+  `fleet-hermes` cannot **edit** an existing secret either, not just create one (§6 recorded only the
+  create limitation). **Exact grant required:**
+
+  | | |
+  |---|---|
+  | Identity | the machine identity in `INFISICAL_CLIENT_ID` on `mcp-higgsfield` (`fleet-hermes`, Universal Auth) |
+  | Project | `INFISICAL_PROJECT_ID` |
+  | Environment | `prod` |
+  | Secret path | `/shared` — ideally scoped to just `HIGGSFIELD_CREDENTIALS_JSON` |
+  | Permission | **`secrets:edit`** (add `secrets:create` only if you want it to create the key too) |
+
+  The push code is already deployed and **self-activating**: it starts working the moment the grant
+  lands, with no code change or redeploy. Until then rotation cannot reach Infisical, so
+  `account_status.durable_recoverable` is `false` and the **host-cron backup in §7 is the only
+  off-volume copy**.
+- **Proposed, NOT created — a credential monitor cron.** Silence is what cost 14 days. Suggested
+  Hermes cron (the fleet can now send outbound email; every entry in a comma list needs its own
+  `email:` prefix):
+
+  ```
+  cronjob(action="create", schedule="0 8 * * *",
+          deliver="email:harsh@webintelligenz.com,email:technology@webintelligenz.com",
+          prompt="Call higgsfield account_status. Report ONLY if action is needed: "
+                 "authenticated is not true, credential.status is not ok, "
+                 "credential.durable_recoverable is false, or live_expires_at_utc is under 12h away. "
+                 "Include the expiry, status and durable_recoverable. Never print a token.")
+  ```
+
+  Daily at 08:00 Melbourne suits a 24h token. Ask before creating it — it is a fleet cron.
 
 ---
 

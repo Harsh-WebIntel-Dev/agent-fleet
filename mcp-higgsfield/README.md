@@ -74,10 +74,10 @@ tool call. `rotation.log` on the volume records each rotation and whether it per
 ## Tests
 No container or network needed:
 ```bash
-python3 -m pytest                 # credguard + server._run  (61 tests)
-./test_entrypoint.sh              # boot precedence + lock clearing (16 checks)
+python3 -m pytest                 # credguard + refresher + bootstrap + server (112 tests)
+./test_entrypoint.sh              # boot precedence + lock clearing (19 checks)
 ```
 
 ## Deploy
-Build `mcp-higgsfield:0.2.2` on the server, run as a Coolify service (internal only), enable "Connect to
+Build `mcp-higgsfield:0.3.0` on the server, run as a Coolify service (internal only), enable "Connect to
 Predefined Networks", then register in LiteLLM as `higgsfield` under access group `fleet_tools`.
