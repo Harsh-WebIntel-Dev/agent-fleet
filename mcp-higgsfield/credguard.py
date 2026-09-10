@@ -198,6 +198,126 @@ def _notify_rotation(cfg_dir: str, on_rotate: Callable[[str], None]) -> None:
         pass
 
 
+# --- health signal --------------------------------------------------------------------------------
+#
+# The credential rotated every ~2h from 26 Aug while the staged seed stayed frozen, and NOTHING
+# surfaced that divergence — the first symptom was a hard failure 14 days later. These helpers make
+# the divergence itself observable, so a routine check catches the rot before a refresh failure does.
+# They report lengths, expiries and booleans only: never a token value.
+
+JOURNAL_NAME = "rotation.log"
+JOURNAL_MAX_LINES = int(os.environ.get("HIGGSFIELD_JOURNAL_MAX_LINES", "100"))
+
+
+def _utc(ts: Any) -> str | None:
+    if not isinstance(ts, (int, float)):
+        return None
+    import datetime
+
+    return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).isoformat()
+
+
+def _bundle_facts(bundle: dict[str, Any] | None, prefix: str) -> dict[str, Any]:
+    """Non-secret facts about a bundle: lengths and expiry, never values."""
+    if not bundle:
+        return {f"{prefix}_present": False, f"{prefix}_expires_at_utc": None}
+    expires_at = bundle.get("expires_at")
+    return {
+        f"{prefix}_present": True,
+        f"{prefix}_access_token_len": len(bundle.get("access_token") or ""),
+        f"{prefix}_refresh_token_len": len(bundle.get("refresh_token") or ""),
+        f"{prefix}_expires_at": expires_at if isinstance(expires_at, (int, float)) else None,
+        f"{prefix}_expires_at_utc": _utc(expires_at),
+    }
+
+
+def health_from_bundles(
+    live: dict[str, Any] | None, seed: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Compare the live bundle against the staged seed and classify the drift."""
+    report: dict[str, Any] = {**_bundle_facts(live, "live"), **_bundle_facts(seed, "seed")}
+
+    live_exp = report.get("live_expires_at")
+    now = time.time()
+    report["live_seconds_since_expiry"] = (now - live_exp) if isinstance(live_exp, (int, float)) else None
+    # Routinely true between calls — the CLI refreshes on demand. Reported, never alarmed on.
+    report["live_access_token_expired"] = (
+        report["live_seconds_since_expiry"] > 0 if report["live_seconds_since_expiry"] is not None else None
+    )
+
+    if live and seed:
+        report["seed_matches_live"] = live.get("refresh_token") == seed.get("refresh_token")
+    else:
+        report["seed_matches_live"] = None
+
+    report["status"], report["warning"] = _classify(live, seed, report["seed_matches_live"])
+    return report
+
+
+def _classify(live, seed, matches) -> tuple[str, str | None]:
+    if not live:
+        return "no_credentials", (
+            "No usable credentials on the volume. Higgsfield calls will fail until a human "
+            "re-authenticates (see reauth_message)."
+        )
+    if not seed:
+        return "no_seed", (
+            "No staged seed. If this volume is ever lost there is nothing to re-seed from — stage "
+            "the CURRENT bundle as HIGGSFIELD_CREDENTIALS_JSON."
+        )
+    if matches is False:
+        return "seed_drift", (
+            "SEED ROT: the live refresh_token has rotated away from the staged seed, so the seed "
+            "would replay as invalid_grant and this volume is now the ONLY live copy. Re-stage the "
+            "current bundle, or grant the machine identity write access so rotation persists itself."
+        )
+    return "ok", None
+
+
+def health(cfg_dir: str, seed_text: str | None) -> dict[str, Any]:
+    """health_from_bundles against the on-disk bundle. Never raises."""
+    live_text = _read_valid(cred_path(cfg_dir))
+    live = json.loads(live_text) if live_text else None
+    seed = _valid_bundle(seed_text) if seed_text else None
+    return health_from_bundles(live, seed)
+
+
+def journal_rotation(cfg_dir: str, persisted: bool, reason: str) -> None:
+    """Append a token-free line recording that a rotation happened and whether it was persisted.
+
+    Off-volume persistence may be unavailable (a read-only secrets identity), in which case this
+    journal is the only durable record that the staged seed has fallen behind, and by how long.
+    """
+    live_text = _read_valid(cred_path(cfg_dir))
+    expires = None
+    if live_text:
+        try:
+            expires = _utc(json.loads(live_text).get("expires_at"))
+        except ValueError:
+            expires = None
+    stamp = _utc(time.time())
+    line = f"{stamp} rotated persisted={persisted} reason={reason} new_expiry={expires}\n"
+    path = os.path.join(cfg_dir, JOURNAL_NAME)
+    try:
+        with open(path, "a") as fh:
+            fh.write(line)
+        _trim_journal(path)
+    except OSError:
+        pass  # the journal is diagnostics; never fail a render for it
+
+
+def _trim_journal(path: str) -> None:
+    """Keep the journal bounded so it can never fill the volume."""
+    try:
+        with open(path) as fh:
+            lines = fh.readlines()
+    except OSError:
+        return
+    if len(lines) <= JOURNAL_MAX_LINES:
+        return
+    atomic_write(path, "".join(lines[-JOURNAL_MAX_LINES:]))
+
+
 def is_auth_failure(stderr: str) -> bool:
     """True when CLI output means 'credentials are dead', not 'this one call went wrong'.
 

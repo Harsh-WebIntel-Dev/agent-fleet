@@ -145,6 +145,75 @@ def test_missing_cli_is_reported_without_touching_credentials(srv, monkeypatch):
     assert json.loads((cfg / "credentials.json").read_text()) == SEED
 
 
+def test_account_status_reports_credential_health_on_success(srv, monkeypatch):
+    """The rot signal must be visible on the happy path, not only when things break."""
+    server, _cfg = srv
+    monkeypatch.setenv("HIGGSFIELD_CREDENTIALS_JSON", json.dumps(SEED))
+    _fake_cli(monkeypatch, server, returncode=0, stdout='{"credits": 7, "email": "a@b.c"}')
+
+    out = server.account_status(None)
+
+    assert out["ok"] is True
+    assert out["credential"]["seed_matches_live"] is True
+    assert out["credential"]["status"] == "ok"
+    assert out["credential"]["live_expires_at_utc"].startswith("2026-08-26T20:12")
+
+
+def test_account_status_surfaces_seed_drift(srv, monkeypatch):
+    """Exactly the state that went unnoticed for 14 days from 26 Aug."""
+    server, cfg = srv
+    rotated = {**SEED, "refresh_token": "n" * 48}
+    (cfg / "credentials.json").write_text(json.dumps(rotated))
+    monkeypatch.setenv("HIGGSFIELD_CREDENTIALS_JSON", json.dumps(SEED))
+    _fake_cli(monkeypatch, server, returncode=0, stdout='{"credits": 7}')
+
+    out = server.account_status(None)
+
+    assert out["credential"]["status"] == "seed_drift"
+    assert out["credential"]["seed_matches_live"] is False
+
+
+def test_account_status_reports_health_even_when_the_call_fails(srv, monkeypatch):
+    """A failed call is exactly when an operator most needs the credential facts."""
+    server, cfg = srv
+    (cfg / "credentials.json").unlink()
+    monkeypatch.setenv("HIGGSFIELD_CREDENTIALS_JSON", json.dumps(SEED))
+    _fake_cli(monkeypatch, server, returncode=1, stderr="Not authenticated.")
+
+    out = server.account_status(None)
+
+    assert out["ok"] is False
+    assert out["credential"]["status"] == "no_credentials"
+    assert out["credential"]["live_present"] is False
+
+
+def test_account_status_never_leaks_a_token(srv, monkeypatch):
+    server, _cfg = srv
+    monkeypatch.setenv("HIGGSFIELD_CREDENTIALS_JSON", json.dumps(SEED))
+    _fake_cli(monkeypatch, server, returncode=0, stdout="{}")
+
+    blob = json.dumps(server.account_status(None))
+
+    assert SEED["refresh_token"] not in blob
+    assert SEED["access_token"] not in blob
+
+
+def test_forbidden_write_back_is_journalled_on_the_volume(srv, monkeypatch):
+    """With Infisical read-only, the journal is the durable record that the seed fell behind."""
+    server, cfg = srv
+    monkeypatch.setattr(
+        server.subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 3, stdout="", stderr=""),
+    )
+
+    server._persist_rotated_credentials(json.dumps(SEED))
+
+    journal = (cfg / "rotation.log").read_text()
+    assert "forbidden" in journal
+    assert "persisted=False" in journal
+    assert SEED["refresh_token"] not in journal
+
+
 def test_cli_timeout_is_reported_and_is_not_an_auth_failure(srv, monkeypatch):
     """A slow render must not be misreported as dead credentials."""
     server, cfg = srv

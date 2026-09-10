@@ -290,6 +290,117 @@ def test_guarded_run_propagates_exceptions_but_still_restores(cfg):
     assert json.loads((cfg / "credentials.json").read_text()) == SEED
 
 
+# --- health signal: the drift that was silent for 14 days ---------------------------------------
+#
+# The credential rotated every ~2h from 26 Aug while the staged seed stayed frozen. Nothing surfaced
+# that divergence, so the first symptom was a hard failure two weeks later. health() exists to make
+# the divergence itself visible, and it must never emit a token value.
+
+
+def test_health_reports_seed_drift_when_live_and_seed_differ():
+    """THE missed signal: this would have been true from ~26 Aug 20:12 UTC onward."""
+    live = {**SEED, "refresh_token": "rotated" + "x" * 41, "expires_at": 4102444800}
+
+    report = credguard.health_from_bundles(live, SEED)
+
+    assert report["seed_matches_live"] is False
+    assert report["status"] == "seed_drift"
+    assert "rot" in report["warning"].lower() or "drift" in report["warning"].lower()
+
+
+def test_health_is_ok_when_seed_matches_live():
+    report = credguard.health_from_bundles(SEED, SEED)
+
+    assert report["seed_matches_live"] is True
+    assert report["status"] == "ok"
+    assert report["warning"] is None
+
+
+def test_health_flags_absent_credentials_as_the_critical_case():
+    report = credguard.health_from_bundles(None, SEED)
+
+    assert report["live_present"] is False
+    assert report["status"] == "no_credentials"
+    assert report["seed_matches_live"] is None
+
+
+def test_health_flags_a_missing_seed_because_reseeding_would_be_impossible():
+    report = credguard.health_from_bundles(SEED, None)
+
+    assert report["seed_present"] is False
+    assert report["status"] == "no_seed"
+
+
+def test_health_reports_expiries_as_readable_utc_and_staleness_hours():
+    report = credguard.health_from_bundles(SEED, SEED)
+
+    assert report["live_expires_at_utc"].startswith("2026-08-26T20:12")
+    assert report["live_seconds_since_expiry"] > 0  # the 26-Aug seed, long expired
+    assert report["seed_expires_at_utc"] == report["live_expires_at_utc"]
+
+
+def test_health_never_emits_a_token_value():
+    """Hard constraint: lengths, expiries and pass/fail only."""
+    live = {**SEED, "refresh_token": "SUPERSECRETREFRESH" + "z" * 30}
+
+    blob = json.dumps(credguard.health_from_bundles(live, SEED))
+
+    assert "SUPERSECRETREFRESH" not in blob
+    assert SEED["access_token"] not in blob
+    assert SEED["refresh_token"] not in blob
+    # but the shape IS reported, so drift is still diagnosable
+    assert credguard.health_from_bundles(live, SEED)["live_refresh_token_len"] == len(live["refresh_token"])
+
+
+def test_an_expired_live_access_token_alone_is_not_an_alarm():
+    """Between calls the access token is routinely expired; the CLI refreshes on demand. Alarming on
+    that would cry wolf and hide the real signal."""
+    stale_access = {**SEED, "expires_at": 1787775122}
+
+    report = credguard.health_from_bundles(stale_access, stale_access)
+
+    assert report["live_access_token_expired"] is True
+    assert report["status"] == "ok"
+
+
+def test_health_reads_the_live_bundle_off_disk(cfg):
+    _write(cfg / "credentials.json", SEED)
+
+    report = credguard.health(str(cfg), json.dumps(SEED))
+
+    assert report["live_present"] is True
+    assert report["seed_matches_live"] is True
+
+
+def test_health_survives_an_unparseable_seed(cfg):
+    _write(cfg / "credentials.json", SEED)
+
+    report = credguard.health(str(cfg), "not json{")
+
+    assert report["seed_present"] is False
+    assert report["status"] == "no_seed"
+
+
+def test_rotation_journal_records_events_without_tokens(cfg):
+    _write(cfg / "credentials.json", SEED)
+
+    credguard.journal_rotation(str(cfg), persisted=False, reason="forbidden")
+
+    line = (cfg / "rotation.log").read_text().strip()
+    assert "forbidden" in line
+    assert SEED["refresh_token"] not in line
+    assert "persisted=False" in line or "persisted=false" in line.lower()
+
+
+def test_rotation_journal_appends_and_is_bounded(cfg):
+    _write(cfg / "credentials.json", SEED)
+    for _ in range(120):
+        credguard.journal_rotation(str(cfg), persisted=True, reason="ok")
+
+    lines = (cfg / "rotation.log").read_text().strip().splitlines()
+    assert 1 < len(lines) <= credguard.JOURNAL_MAX_LINES
+
+
 # --- error classification -----------------------------------------------------------------------
 
 

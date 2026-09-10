@@ -86,17 +86,24 @@ def _persist_rotated_credentials(bundle_text: str) -> None:
         )
     except (OSError, subprocess.SubprocessError) as exc:
         log.warning("rotation write-back skipped: %s", type(exc).__name__)
+        credguard.journal_rotation(CRED_DIR, persisted=False, reason=type(exc).__name__)
         return
     if proc.returncode == 0:
         log.info("rotated credentials pushed back to Infisical")
+        credguard.journal_rotation(CRED_DIR, persisted=True, reason="infisical")
     elif proc.returncode == 3:
-        # Documented, expected on a read-only Viewer identity. Say so once, plainly, and move on.
+        # Verified 2026-09-10: Infisical answers 403 "You are not allowed to edit on secrets". Until
+        # an admin grants write, this journal + account_status's `seed_drift` are the only signals
+        # that the seed has fallen behind and the volume holds the only live copy.
         log.warning(
-            "rotation write-back FORBIDDEN (identity lacks write scope) — the staged seed will "
-            "stay stale; the live bundle exists ONLY on this volume"
+            "rotation write-back FORBIDDEN (identity lacks write scope) — the staged seed is now "
+            "STALE and this volume holds the ONLY live copy. Re-stage HIGGSFIELD_CREDENTIALS_JSON "
+            "or grant the machine identity secrets:edit on /shared."
         )
+        credguard.journal_rotation(CRED_DIR, persisted=False, reason="forbidden")
     else:
         log.warning("rotation write-back failed (exit %s)", proc.returncode)
+        credguard.journal_rotation(CRED_DIR, persisted=False, reason=f"exit{proc.returncode}")
 
 
 def _invoke_cli(args: list[str]) -> tuple[bool, Any, str]:
@@ -321,14 +328,32 @@ def list_image_models(ctx: Context) -> dict[str, Any]:
 def account_status(ctx: Context) -> dict[str, Any]:
     """Health check: confirm the sidecar is authenticated and report remaining credits. Never returns tokens."""
     ok, data, err = _run(["account", "status"])
+    # Always attach the credential health block, especially on failure: the drift it reports is what
+    # silently preceded the 2026-09-09 outage for 14 days.
+    cred = _credential_health()
     if not ok:
-        return {"ok": False, "authenticated": False, "error": "account_failed", "detail": err}
+        return {"ok": False, "authenticated": False, "error": "account_failed", "detail": err,
+                "credential": cred}
     credits = email = plan = None
     if isinstance(data, dict):
         credits = data.get("credits") or data.get("balance")
         email = data.get("email")
         plan = data.get("subscription_plan_type") or data.get("plan")
-    return {"ok": True, "authenticated": True, "credits": credits, "email": email, "plan": plan}
+    return {"ok": True, "authenticated": True, "credits": credits, "email": email, "plan": plan,
+            "credential": cred}
+
+
+def _credential_health() -> dict[str, Any]:
+    """Credential drift report for account_status. Lengths, expiries and booleans only — no tokens.
+
+    The seed is read from the env copy rather than re-fetched from Infisical so this stays a cheap,
+    dependency-free health check that still answers "would a re-seed actually work?".
+    """
+    seed = os.environ.get(CRED_SECRET_NAME)
+    report = credguard.health(CRED_DIR, seed)
+    if report.get("status") != "ok":
+        log.warning("credential health: %s — %s", report.get("status"), report.get("warning"))
+    return report
 
 
 def _safe_get(url: str, headers: dict[str, str] | None = None,
@@ -402,6 +427,16 @@ def verify_url(ctx: Context, url: str, expect_text: str = "") -> dict[str, Any]:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+    # Surface credential drift on every boot, so `docker logs` alone answers "is the seed still
+    # good?". Silence on that question is what let the 26-Aug seed rot unnoticed for 14 days.
+    _boot = _credential_health()
+    log.info(
+        "boot credential health: status=%s live_present=%s seed_present=%s seed_matches_live=%s "
+        "live_expires_at_utc=%s",
+        _boot.get("status"), _boot.get("live_present"), _boot.get("seed_present"),
+        _boot.get("seed_matches_live"), _boot.get("live_expires_at_utc"),
+    )
     mcp.run(transport="streamable-http", host="0.0.0.0",
             port=int(os.environ.get("PORT", "8080")), streamable_http_path="/mcp",
             stateless_http=True)
