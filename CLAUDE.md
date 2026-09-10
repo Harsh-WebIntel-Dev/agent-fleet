@@ -324,6 +324,21 @@ client `sRGCQJvvJkPrrtRj`, scopes `email profile offline_access user:org:read`).
   alive after transplanting its credentials). Rotation plus reuse detection can revoke the whole token
   family.
 
+**Durability guard + health signal (deployed 2026-09-10, `mcp-higgsfield:0.2.2`).** The vendored CLI
+deletes `credentials.json` on every failed refresh, so `credguard.py` brackets each invocation:
+snapshot → run → atomic restore from `credentials.json.prev`, all writes temp+fsync+rename, stale
+`*.lock` cleared on boot and after a destructive failure, and CLI calls serialised in-process (two
+parallel refreshes could trip Clerk's reuse detection). Boot precedence is **usable live bundle >
+`.prev` snapshot (rotated, newer) > staged seed**.
+
+Because the rot was *silent* for 14 days, **`account_status` now returns a `credential` block** —
+`status` (`ok` / `seed_drift` / `no_seed` / `no_credentials`), `seed_matches_live`, and both expiries,
+as lengths/timestamps/booleans only (never a token). The same line is logged on every boot, so
+`docker logs` alone answers "is the seed still good?". `seed_drift` means the live token has rotated
+away from the seed and the volume is the only live copy. `rotation.log` on the volume records each
+rotation and whether it persisted (bounded to 100 lines). Note an expired *access* token is normal
+between calls and is reported but never alarmed on.
+
 ### Sidecar build pattern
 
 Each `mcp-*/` is a self-hosted MCP server, its own Coolify service:
@@ -481,11 +496,20 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
   **whole** as `HIGGSFIELD_CREDENTIALS_JSON` in Infisical `/shared` and restart `mcp-higgsfield`. Stop
   using the CLI on that machine afterwards (parallel refresh can revoke the token family). Producer
   image renders fail until then; `render-card` HTML→PNG cards are unaffected. See §7 and §15.
-- **Higgsfield rotation write-back permission** — the durability fix pushes each rotated bundle back to
-  Infisical so the seed stops rotting, but per §6 the `fleet-hermes` identity is a read-only Viewer.
-  Whether it may *update* an existing secret (a different permission from creating one) is
-  **unverified**; the push is fail-safe and logs `FORBIDDEN` if not. Confirm, and grant write on just
-  `/shared/HIGGSFIELD_CREDENTIALS_JSON` if needed — otherwise the volume stays a single point of loss.
+  **The durability guard is already deployed** (2026-09-10, image `mcp-higgsfield:0.2.2`, also tagged
+  `0.2.1`; rollback image `mcp-higgsfield:0.2.1-bak-20260910`), so the credential obtained by that
+  re-auth is protected from the moment it lands. **Deploy order matters: fix first, then re-auth** —
+  re-authenticating into the old sidecar would put a fresh token straight back in the same trap.
+- **Higgsfield rotation write-back is BLOCKED on one Infisical permission** (verified 2026-09-10, not a
+  guess). An idempotent self-write — fetch `/shared/HIGGSFIELD_CREDENTIALS_JSON` and PATCH the
+  identical value straight back — returns
+  `403 {"message":"You are not allowed to edit on secrets","error":"PermissionDenied"}`. So
+  `fleet-hermes` cannot **edit** an existing secret either, not just create one (§6 previously only
+  recorded the create limitation). **Remedy: grant that identity `secrets:edit` on `/shared`** (ideally
+  scoped to that one key). The push code is already deployed and self-activating — it starts working
+  the moment the grant lands, no code change or redeploy needed. Until then rotation cannot persist
+  off-volume, so **that one Docker volume remains a single point of loss**; the drift is at least no
+  longer silent (see the health signal in §7).
 
 ---
 
