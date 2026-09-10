@@ -433,3 +433,55 @@ def test_reauth_message_names_the_real_remedy_not_the_canned_hf_hint():
     assert "auth login" in msg
     assert "HIGGSFIELD_CREDENTIALS_JSON" in msg
     assert "browser" in msg.lower()
+
+
+# --- durable drift: "if this volume died now, would the stored secret still work?" ---------------
+
+
+def test_durable_drift_flags_a_stale_durable_seed(cfg):
+    """From 26 Aug to 09 Sep this was the true state and nothing reported it."""
+    _write(cfg / "credentials.json", {**SEED, "refresh_token": "rotated" + "x" * 41})
+
+    out = credguard.durable_drift(str(cfg), json.dumps(SEED))
+
+    assert out["durable_seed_matches_live"] is False
+    assert out["durable_recoverable"] is False
+    assert "DURABLE ROT" in out["durable_warning"]
+
+
+def test_durable_drift_confirms_recoverable_when_they_match(cfg):
+    _write(cfg / "credentials.json", SEED)
+
+    out = credguard.durable_drift(str(cfg), json.dumps(SEED))
+
+    assert out["durable_seed_matches_live"] is True
+    assert out["durable_recoverable"] is True
+    assert "durable_warning" not in out
+
+
+def test_durable_drift_handles_an_unreachable_store(cfg):
+    """Infisical being down must not be reported as recoverable."""
+    _write(cfg / "credentials.json", SEED)
+
+    out = credguard.durable_drift(str(cfg), None)
+
+    assert out["durable_seed_present"] is False
+    assert out["durable_seed_matches_live"] is None
+    assert out["durable_recoverable"] is False
+
+
+def test_durable_drift_handles_a_missing_live_credential(cfg):
+    out = credguard.durable_drift(str(cfg), json.dumps(SEED))
+
+    assert out["durable_seed_matches_live"] is None
+    assert out["durable_recoverable"] is False
+
+
+def test_durable_drift_never_emits_a_token(cfg):
+    live = {**SEED, "refresh_token": "LIVESECRET" + "y" * 38}
+    _write(cfg / "credentials.json", live)
+
+    blob = json.dumps(credguard.durable_drift(str(cfg), json.dumps(SEED)))
+
+    assert "LIVESECRET" not in blob
+    assert SEED["refresh_token"] not in blob

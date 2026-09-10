@@ -38,6 +38,7 @@ import socket
 import ssl
 import struct
 import subprocess
+import time
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -45,6 +46,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer, Context
 
 import credguard
+import refresher
 
 log = logging.getLogger("higgsfield.credguard")
 
@@ -59,6 +61,8 @@ CRED_DIR = os.environ.get(
 )
 CRED_SECRET_NAME = "HIGGSFIELD_CREDENTIALS_JSON"
 INFISICAL_PUSH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "infisical_push.py")
+INFISICAL_FETCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "infisical_fetch.py")
+_REFRESH_LOOP: refresher.RefreshLoop | None = None
 
 mcp = MCPServer(
     name="higgsfield",
@@ -136,9 +140,15 @@ def _run(args: list[str]) -> tuple[bool, Any, str]:
     if not shutil.which(HIGGSFIELD_BIN) and not os.path.exists(HIGGSFIELD_BIN):
         return False, None, "higgsfield CLI not found in container"
 
-    (ok, data, err), restored = credguard.guarded_run(
-        CRED_DIR, lambda: _invoke_cli(args), on_rotate=_persist_rotated_credentials
-    )
+    # The cross-process lock is held for the whole CLI call: if the CLI decides to refresh
+    # internally, it must not race our proactive refresher (Clerk revokes reused token families).
+    try:
+        with credguard.exclusive_refresh_lock(CRED_DIR):
+            (ok, data, err), restored = credguard.guarded_run(
+                CRED_DIR, lambda: _invoke_cli(args), on_rotate=_persist_rotated_credentials
+            )
+    except TimeoutError as exc:
+        return False, None, f"another Higgsfield refresh is in progress: {exc}"
     if ok:
         return ok, data, err
 
@@ -343,16 +353,49 @@ def account_status(ctx: Context) -> dict[str, Any]:
             "credential": cred}
 
 
+_DURABLE_CACHE: dict[str, Any] = {"text": None, "at": 0.0}
+DURABLE_CACHE_TTL_S = float(os.environ.get("HIGGSFIELD_DURABLE_CACHE_TTL_S", "60"))
+
+
+def _durable_seed_text() -> str | None:
+    """Fetch the CURRENT durable seed from Infisical, briefly cached.
+
+    Comparing against the boot-time env copy is not enough: that snapshot is frozen at boot, so it
+    cannot tell us whether the DURABLE store has fallen behind the live credential — which is exactly
+    the rot that went unnoticed from 26 Aug. Cached so account_status stays cheap.
+    """
+    now = time.time()
+    if _DURABLE_CACHE["text"] is not None and now - _DURABLE_CACHE["at"] < DURABLE_CACHE_TTL_S:
+        return _DURABLE_CACHE["text"]
+    try:
+        proc = subprocess.run(
+            ["python3", INFISICAL_FETCH, CRED_SECRET_NAME, "/shared"],
+            capture_output=True, text=True, timeout=10,
+        )
+        text = proc.stdout if proc.returncode == 0 and proc.stdout.strip() else None
+    except (OSError, subprocess.SubprocessError):
+        text = None
+    if text is not None:
+        _DURABLE_CACHE.update(text=text, at=now)
+    return text
+
+
 def _credential_health() -> dict[str, Any]:
     """Credential drift report for account_status. Lengths, expiries and booleans only — no tokens.
 
-    The seed is read from the env copy rather than re-fetched from Infisical so this stays a cheap,
-    dependency-free health check that still answers "would a re-seed actually work?".
+    Reports drift against BOTH the boot-time seed and the live durable store, because those answer
+    different questions: "would a restart change anything?" versus "would a re-seed actually work?".
     """
-    seed = os.environ.get(CRED_SECRET_NAME)
-    report = credguard.health(CRED_DIR, seed)
+    report = credguard.health(CRED_DIR, os.environ.get(CRED_SECRET_NAME))
+    report.update(credguard.durable_drift(CRED_DIR, _durable_seed_text()))
     if report.get("status") != "ok":
         log.warning("credential health: %s — %s", report.get("status"), report.get("warning"))
+
+    loop = _REFRESH_LOOP
+    report["refresher_running"] = bool(loop and loop.is_alive())
+    if loop is not None:
+        report["refresher_last_error"] = loop.last_error
+        report["seconds_until_refresh_due"] = loop.seconds_until_due()
     return report
 
 
@@ -426,6 +469,27 @@ def verify_url(ctx: Context, url: str, expect_text: str = "") -> dict[str, Any]:
         return {"ok": False, "live": False, "error": type(exc).__name__, "detail": str(exc)[:300]}
 
 
+def _verify_credential_with_cli() -> bool:
+    """Does the CLI accept the credential currently on disk? Used to validate a rotation."""
+    ok, _data, _err = _run(["account", "status"])
+    return ok
+
+
+def _start_refresher() -> None:
+    """Own the refresh so it happens EARLY and in exactly one place.
+
+    Left to itself the CLI refreshes only once the token is already unusable, which leaves no retry
+    budget, and it rotates where we cannot persist from. Keeping the token fresh here means the CLI
+    never reaches its own refresh path, so there is effectively a single refresher — important because
+    Clerk revokes a reused token family.
+    """
+    global _REFRESH_LOOP
+    _REFRESH_LOOP = refresher.RefreshLoop(
+        CRED_DIR, verify=_verify_credential_with_cli, persist=_persist_rotated_credentials
+    )
+    _REFRESH_LOOP.start()
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
     # Surface credential drift on every boot, so `docker logs` alone answers "is the seed still
@@ -437,6 +501,7 @@ if __name__ == "__main__":
         _boot.get("status"), _boot.get("live_present"), _boot.get("seed_present"),
         _boot.get("seed_matches_live"), _boot.get("live_expires_at_utc"),
     )
+    _start_refresher()
     mcp.run(transport="streamable-http", host="0.0.0.0",
             port=int(os.environ.get("PORT", "8080")), streamable_http_path="/mcp",
             stateless_http=True)

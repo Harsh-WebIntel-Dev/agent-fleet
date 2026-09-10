@@ -23,10 +23,12 @@ The entrypoint seeds it onto a persisted volume once; the CLI refreshes from the
 bundle is never overwritten on restart, because the seed is older than the rotated token.
 
 ### The credential is rotating, and the volume is its only live copy
-Clerk issues a **2-hour** access token and returns a **new `refresh_token` on every exchange**. So:
+Clerk issues a **~24-hour** access token (86,400s — MEASURED 2026-09-10 from a freshly issued
+credential; a Clerk doc *example* showing 7200s is not this deployment) and returns a **new
+`refresh_token` on every exchange**. So:
 
-- `HIGGSFIELD_CREDENTIALS_JSON` is a **first-boot seed only**. It is correct for about two hours after
-  capture; after that it replays as `invalid_grant`. A restart will re-seed it and still fail.
+- `HIGGSFIELD_CREDENTIALS_JSON` is a **first-boot seed only**. It is correct only until the next
+  rotation; after that it replays as `invalid_grant`. A restart will re-seed it and still fail.
 - The live bundle exists **only** on the `higgsfield-config` volume. If it is lost, auth is lost and a
   human must repeat the browser login — there is no headless recovery.
 - Never let two copies refresh in parallel (e.g. a laptop login left active after transplanting it).
@@ -54,7 +56,7 @@ failed refresh. We cannot patch the vendor binary, so every CLI call is brackete
   rewritten into the actual remedy, because that string means dead credentials, not a network blip.
 
 ### Health signal: `account_status` reports credential drift
-The rot was silent for 14 days — the credential rotated every ~2h while the seed stayed frozen, and
+The rot was silent for 14 days — the credential rotated daily while the seed stayed frozen, and
 nothing surfaced it. `account_status` now returns a `credential` block on both the success and failure
 paths:
 

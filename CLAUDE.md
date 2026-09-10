@@ -299,14 +299,15 @@ All agents reach tools through the litellm **aggregated `/mcp/`** endpoint (Herm
 
 Higgsfield has **no API key**. Auth is OAuth 2.0 PKCE against **Clerk** (`clerk.higgsfield.ai`, public
 client `sRGCQJvvJkPrrtRj`, scopes `email profile offline_access user:org:read`). The access token lives
-**2 hours**, and Clerk returns a **new `refresh_token` on every exchange**. The vendored
+**~24 hours** (86,400s — MEASURED 2026-09-10 from a freshly issued credential; the 7200s in a Clerk
+doc example is not this deployment), and Clerk returns a **new `refresh_token` on every exchange**. The vendored
 `@higgsfield/cli` binary owns that refresh and writes the result **only** to
 `/root/.config/higgsfield/credentials.json` on the named volume
 `…_higgsfield-config`. Consequences, all verified 2026-09-10:
 
-- **That volume is the single live copy of a credential that changes every ~2h.** Lose it and auth is
+- **That volume is the single live copy of a credential that rotates daily.** Lose it and auth is
   gone — there is no other current copy anywhere.
-- **The staged seed rots within ~2h of capture.** `HIGGSFIELD_CREDENTIALS_JSON` (Infisical `/shared`,
+- **The staged seed rots at the first rotation after capture.** `HIGGSFIELD_CREDENTIALS_JSON` (Infisical `/shared`,
   mirrored in the Coolify env) is only a *first-boot* seed. The 26-Aug seed was replayed on 2026-09-10
   and Clerk answered **`invalid_grant`** — "the refresh token is malformed or not valid". A restart
   re-seeds the file happily and the very next call still fails.
@@ -476,7 +477,7 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
 - prod-2 load is largely hypervisor **CPU steal**, not fleet workload — removing services won't fix it.
 - Higgsfield auth is a **rotating** OAuth pair living only on one Docker volume, and the vendored CLI
   **deletes `credentials.json` on every failed refresh** without writing a replacement (durable data
-  loss; reproduced deterministically 2026-09-10). The staged seed is stale ~2h after capture, so a
+  loss; reproduced deterministically 2026-09-10). The staged seed goes stale at the first rotation, so a
   restart cannot recover it — re-auth is human-only. See §7.
 
 ---

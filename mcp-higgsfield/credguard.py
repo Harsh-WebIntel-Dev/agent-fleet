@@ -22,6 +22,8 @@ container: rotation write-back is delivered through the `on_rotate` callback (se
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -33,6 +35,9 @@ from typing import Any, Callable
 CRED_NAME = "credentials.json"
 PREV_NAME = "credentials.json.prev"
 LOCK_NAME = "credentials.json.lock"
+# Our own lock, distinct from the vendor CLI's, guarding every rotation-capable operation.
+REFRESH_LOCK_NAME = "refresh.lock"
+REFRESH_LOCK_TIMEOUT_S = float(os.environ.get("HIGGSFIELD_REFRESH_LOCK_TIMEOUT_S", "60"))
 
 # A refresh is a single API round-trip. A lock older than this cannot belong to a live refresh, so it
 # was orphaned by a crashed/killed one and would otherwise block every retry forever.
@@ -41,6 +46,9 @@ DEFAULT_LOCK_MAX_AGE_S = float(os.environ.get("HIGGSFIELD_LOCK_MAX_AGE_S", "120"
 # Serialise CLI calls in-process. Two concurrent refreshes would present the same refresh_token to
 # Clerk; with rotation + reuse detection that can revoke the whole token family.
 _CALL_LOCK = threading.Lock()
+
+# Per-thread re-entrancy depth for exclusive_refresh_lock (see the note in that function).
+_LOCAL = threading.local()
 
 _AUTH_FAILURE_NEEDLES = (
     "no response received",
@@ -124,6 +132,66 @@ def fingerprint(cfg_dir: str) -> str | None:
     return hashlib.sha256(text.encode()).hexdigest() if text else None
 
 
+def read_live(cfg_dir: str) -> str | None:
+    """The live bundle's text if it is usable, else None."""
+    return _read_valid(cred_path(cfg_dir))
+
+
+@contextlib.contextmanager
+def exclusive_refresh_lock(cfg_dir: str, timeout_s: float = REFRESH_LOCK_TIMEOUT_S):
+    """Cross-process mutual exclusion for anything that may rotate the credential.
+
+    Clerk rotates the refresh_token on every exchange and applies reuse detection, so two refreshers
+    racing can revoke the whole token family — the most likely cause of the 26-Aug credential dying.
+    A threading.Lock only covers one process; this uses a real OS advisory lock (flock) on a file on
+    the shared volume, so exclusion holds across processes and across containers mounting it.
+
+    Held on a DEDICATED file, never the CLI's own credentials.json.lock, so we don't fight the vendor
+    for its lock.
+    """
+    # Re-entrant within a thread. flock is per open-file-description, so a second fd opened by the
+    # SAME process still conflicts — without this, a verification CLI call made from inside a
+    # rotation (refresher.refresh_once -> verify -> _run) would deadlock against its own lock.
+    depth = getattr(_LOCAL, "refresh_depth", 0)
+    if depth:
+        _LOCAL.refresh_depth = depth + 1
+        try:
+            yield
+        finally:
+            _LOCAL.refresh_depth -= 1
+        return
+
+    os.makedirs(cfg_dir, exist_ok=True)
+    path = os.path.join(cfg_dir, REFRESH_LOCK_NAME)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    deadline = time.time() + timeout_s
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.time() >= deadline:
+                    raise TimeoutError(
+                        f"another process has held the Higgsfield refresh lock for >{timeout_s}s"
+                    )
+                time.sleep(0.2)
+        # Record the holder so a stuck lock is diagnosable without guesswork.
+        try:
+            os.truncate(fd, 0)
+            os.write(fd, f"pid={os.getpid()} since={time.time():.0f}\n".encode())
+        except OSError:
+            pass
+        _LOCAL.refresh_depth = 1
+        yield
+    finally:
+        _LOCAL.refresh_depth = 0
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
 def clear_stale_lock(cfg_dir: str, max_age_s: float = DEFAULT_LOCK_MAX_AGE_S) -> bool:
     """Remove an orphaned refresh lock. Returns True if one was removed."""
     lock = os.path.join(cfg_dir, LOCK_NAME)
@@ -200,7 +268,7 @@ def _notify_rotation(cfg_dir: str, on_rotate: Callable[[str], None]) -> None:
 
 # --- health signal --------------------------------------------------------------------------------
 #
-# The credential rotated every ~2h from 26 Aug while the staged seed stayed frozen, and NOTHING
+# The credential rotated from 26 Aug while the staged seed stayed frozen, and NOTHING
 # surfaced that divergence — the first symptom was a hard failure 14 days later. These helpers make
 # the divergence itself observable, so a routine check catches the rot before a refresh failure does.
 # They report lengths, expiries and booleans only: never a token value.
@@ -280,6 +348,36 @@ def health(cfg_dir: str, seed_text: str | None) -> dict[str, Any]:
     live = json.loads(live_text) if live_text else None
     seed = _valid_bundle(seed_text) if seed_text else None
     return health_from_bundles(live, seed)
+
+
+def durable_drift(cfg_dir: str, durable_text: str | None) -> dict[str, Any]:
+    """Has the DURABLE store fallen behind the live credential?
+
+    Distinct from the boot-seed comparison in health(): that snapshot is frozen at boot, so it cannot
+    answer "if this volume died right now, would the stored secret still work?". From 26 Aug to
+    09 Sep the answer was no and nothing said so.
+    """
+    live = _valid_bundle(read_live(cfg_dir) or "") if read_live(cfg_dir) else None
+    durable = _valid_bundle(durable_text) if durable_text else None
+    out: dict[str, Any] = {
+        "durable_seed_present": durable is not None,
+        "durable_seed_expires_at_utc": _utc(durable.get("expires_at")) if durable else None,
+    }
+    if live is None or durable is None:
+        out["durable_seed_matches_live"] = None
+        out["durable_recoverable"] = False
+        return out
+    matches = live.get("refresh_token") == durable.get("refresh_token")
+    out["durable_seed_matches_live"] = matches
+    # "Recoverable" = if the volume vanished, re-seeding from durable storage would actually work.
+    out["durable_recoverable"] = matches
+    if not matches:
+        out["durable_warning"] = (
+            "DURABLE ROT: the credential in Infisical is not the live one. If this volume is lost, "
+            "re-seeding will fail with invalid_grant and a human must re-authenticate. Grant the "
+            "machine identity secrets:edit on /shared so rotation can persist itself."
+        )
+    return out
 
 
 def journal_rotation(cfg_dir: str, persisted: bool, reason: str) -> None:
