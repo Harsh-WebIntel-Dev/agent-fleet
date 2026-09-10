@@ -1,9 +1,14 @@
 services:
   # Thin MCP over the official Higgsfield CLI: lets the fleet `image` agent render brand-quality images.
   # Internal only (no FQDN, traefik off). Auth = OAuth token bundle from a one-time browser `higgsfield
-  # auth login`, seeded from a Coolify secret onto a PERSISTED volume so the CLI can refresh headlessly.
+  # auth login`, seeded onto a PERSISTED volume; this sidecar then owns proactive rotation (refresher.py).
+  #
+  # KEEP THIS TAG IN STEP WITH COOLIFY. The deployed Coolify service pins the image tag in its own
+  # compose, and on 2026-09-10 it still pinned 0.2.0 — a tag that no longer existed on the host — while
+  # the running container carried the fix only as a hot-patched container layer. A redeploy would have
+  # reverted to an unpatched image (or failed to find one). Bump BOTH when you build a new image.
   mcp-higgsfield:
-    image: mcp-higgsfield:0.1.0
+    image: mcp-higgsfield:0.3.0
     restart: unless-stopped
     environment:
       - PORT=8080

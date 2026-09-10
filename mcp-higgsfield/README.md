@@ -50,8 +50,26 @@ failed refresh. We cannot patch the vendor binary, so every CLI call is brackete
 - **Rotated bundles are pushed back to Infisical** (`infisical_push.py`, value on stdin, never argv) so
   the seed stops rotting. **Currently blocked:** verified 2026-09-10 that Infisical answers
   `403 "You are not allowed to edit on secrets"` — the `fleet-hermes` identity cannot edit an existing
-  secret. Grant it `secrets:edit` on `/shared` and this starts working with no code change. Until then
-  the push logs `FORBIDDEN`, records the miss in `rotation.log`, and renders continue.
+  secret. Grant it `secrets:edit` and this starts working with no code change. Until then the push logs
+  `FORBIDDEN`, records the miss in `rotation.log`, and renders continue.
+
+### ⚠️ Where the durable copy actually lives today
+Because that push is blocked, **the only off-volume copy is a host backup on prod-2**, not Infisical:
+
+| | |
+|---|---|
+| Location | `/home/harsh/higgsfield-cred/` (`latest.json` + last 10 `credentials-<UTC>.json`) |
+| Permissions | dir `0700`, files `0600` |
+| Refreshed by | `*/10` host cron → `/home/harsh/higgsfield-cred-backup.sh` (source: `ops/higgsfield-cred-backup.sh`) |
+| History | `/home/harsh/higgsfield-cred/backup.log` |
+
+**To recover a lost volume:** copy `latest.json` in as `credentials.json` (mode 600) and restart, or
+stage its contents as `HIGGSFIELD_CREDENTIALS_JSON` and restart. **Do not** use the Infisical seed or
+the Coolify env var — both are stale and replay as `invalid_grant`.
+
+`account_status.durable_recoverable: false` and the `seed_drift` warning are accurate and will keep
+firing until the grant lands. They mean *the secrets store cannot re-seed this* — not that the
+credential is unprotected.
 - **Auth failures are reported honestly.** The CLI's `request failed (no response received)` is
   rewritten into the actual remedy, because that string means dead credentials, not a network blip.
 
@@ -79,5 +97,11 @@ python3 -m pytest                 # credguard + refresher + bootstrap + server (
 ```
 
 ## Deploy
+⚠️ **The Coolify service pins its own image tag in its own compose.** Bumping the tag here is not
+enough — update the Coolify service too, or a redeploy will run a stale image. On 2026-09-10 it still
+pinned `0.2.0`, a tag that no longer existed on the host, while the fix lived only in a hot-patched
+container layer (`docker cp` survives `docker restart`, not a redeploy). Check with
+`docker inspect <container> --format '{{.Config.Image}}'` and `docker diff <container> | grep /app`.
+
 Build `mcp-higgsfield:0.3.0` on the server, run as a Coolify service (internal only), enable "Connect to
 Predefined Networks", then register in LiteLLM as `higgsfield` under access group `fleet_tools`.

@@ -357,14 +357,30 @@ cannot persist from. So the sidecar performs the `refresh_token` grant itself:
 - **CONFIRMED by a live rotation 2026-09-10:** the `refresh_token` really does change on every
   exchange (`3cf0199e…` → `57d740d9…`) and the new TTL was **86,396s = 24.00h**.
 
-**Off-volume persistence — blocked on one grant, with an interim.** Infisical is the intended target
-and the push is deployed and self-activating, but write is denied (§16). Interim:
-`mcp-higgsfield/ops/higgsfield-cred-backup.sh`, on a **`*/10` host cron**, copies the live bundle to
-`/home/harsh/higgsfield-cred/` (dir `0700`, files `0600`, bounded generations, writes only on change,
-never logs a token). The host survives container recreate, image rebuild and `docker volume rm` — the
-same tier CLAUDE.md already trusts for `/home/harsh/litellm-cfg/`. **Deliberately not R2/mcp-spaces:**
-that bucket is agent-readable via `spaces_read`, so a live refresh_token there would be exposed to the
-whole fleet. Remove with `crontab -l | grep -v higgsfield-cred-backup | crontab -`.
+### What actually protects the Higgsfield credential TODAY
+
+> **The durable copy is a HOST BACKUP, not Infisical.** Rotation cannot reach Infisical — write is
+> denied (§16) — so as of 2026-09-11 the only off-volume copy lives at
+> **`/home/harsh/higgsfield-cred/` on prod-2** (`latest.json` plus the last 10
+> `credentials-<UTC>.json` generations, dir `0700`, files `0600`), refreshed by a **`*/10` host cron**
+> running `/home/harsh/higgsfield-cred-backup.sh` (source:
+> `mcp-higgsfield/ops/higgsfield-cred-backup.sh`). History is in
+> `/home/harsh/higgsfield-cred/backup.log`.
+>
+> **If the volume is lost, recover from there** — copy `latest.json` into the volume as
+> `credentials.json` (mode 600) and restart, or stage its contents as
+> `HIGGSFIELD_CREDENTIALS_JSON` and restart. Do NOT reach for the Infisical seed or the Coolify env
+> var: both are stale and will replay as `invalid_grant`.
+>
+> `account_status.durable_recoverable` reports `false` precisely because Infisical is stale, and the
+> `seed_drift` warning fires on every render. That is accurate and will keep firing until the grant in
+> §16 is created. It is **not** telling you the credential is unprotected — the host backup is what
+> protects it — only that the *secrets store* could not re-seed it.
+
+The host tier survives container recreate, image rebuild and `docker volume rm` — the same tier
+CLAUDE.md already trusts for `/home/harsh/litellm-cfg/`. **Deliberately not R2/mcp-spaces:** that
+bucket is agent-readable via `spaces_read`, so a live refresh_token there would be exposed to the
+whole fleet. Remove the cron with `crontab -l | grep -v higgsfield-cred-backup | crontab -`.
 
 **Boot selection is "newest `expires_at` wins"** across {volume, snapshot, seed} (`bootstrap.py`,
 unit-tested). The earlier "never clobber" rule caused a real miss: a human staged a fresh credential
@@ -511,6 +527,12 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
   **deletes `credentials.json` on every failed refresh** without writing a replacement (durable data
   loss; reproduced deterministically 2026-09-10). The staged seed goes stale at the first rotation, so a
   restart cannot recover it — re-auth is human-only. See §7.
+- **A `docker cp` hot-patch survives `docker restart` but NOT a Coolify redeploy**, and Coolify pins the
+  image tag in its OWN compose — which can drift from `mcp-higgsfield/compose.yml` and even point at a
+  tag that no longer exists on the host (it pinned `0.2.0` after that tag was gone, 2026-09-10). Verify
+  with `docker inspect <c> --format '{{.Config.Image}}'` + `docker diff <c> | grep /app`: source files
+  showing as `A`/`C` mean the fix is in a container layer only. Fix = bake an image, update the Coolify
+  service's compose tag, redeploy.
 
 ---
 
