@@ -410,9 +410,10 @@ drops it). Never connect the webui to the sandbox's own network (breaks Traefik 
 
 - **SOUL edits:** read the **live** file, keep a dated `.bak-*`, edit, stream back as `hermes`, `diff`.
   Read per-turn → **no restart**.
-- **MCP tool / `config.yaml` / model changes:** clear `cache/mcp_schema_cache.json` +
-  `tool_discovery_cache.json` (main **and** `profiles/*/cache/`) and **restart both** hermes containers
-  — each process caches tool schemas independently.
+- **MCP tool / `config.yaml` / model changes:** the on-disk `mcp_schema_cache.json` is **not** consulted for
+  `pm_comms` (it is not `lazy:` and LiteLLM sends `ttl_ms: 0`); what pins tools is the **in-process registry** of the
+  gateway (and, separately, of the dashboard process). Apply MCP config edits with a `hermes gateway restart` (slot)
+  in a quiet window; kanban workers discover fresh per dispatch.
 - **Restart vs redeploy:** `docker restart -t 30 <agent> <webui>` preserves volumes + the sandbox link;
   a Coolify **redeploy recreates** the container → drops the sandbox link (re-run `setup-sandbox.sh`).
   Restart only in a **quiet window** (`hermes cron runs` shows nothing in-flight).
