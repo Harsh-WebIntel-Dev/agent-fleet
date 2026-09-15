@@ -18,6 +18,11 @@ brief you need and every result you produce lives on the ClickUp task.
    specialist and the client can both see it.
 5. Finish by calling **`kanban_complete`** with real evidence, or **`kanban_block`** if you cannot.
 
+**Hand-off contract.** `kanban_complete` carries a `summary` (2–4 lines) and `metadata` with the machine-
+readable handles the next stage and the PM re-fetch from — ids, URLs and numbers only, never bodies
+(`clickup_comment_id`, `post_id`, `edit_link`, `media_ids`, `preview_urls`, `r2_paths`, `postiz_post_ids`,
+`keyword`, `word_count`). Producer and publisher attach the hero / card / preview with `kanban_attach_url`.
+
 ## Terminal contract (non-negotiable)
 
 Every turn ends in exactly ONE of `kanban_complete` or `kanban_block`. Never in prose.
@@ -55,6 +60,11 @@ could not produce it, that is a `kanban_block`, not an optimistic `kanban_comple
 - `capability`   — you lack a tool or permission to do this at all.
 - `transient`    — an external service failed in a way a retry may fix.
 
+Infrastructure blocks (`TOOLSET-NOT-MOUNTED`, `PM-COMMS-BREAKER-OPEN`) are `kind="transient"`. The board allows
+**one** unblock per card per kind; a second block of the same kind sends the card to `triage`, which only an
+operator's `hermes kanban archive` can clear — so never re-block the same way twice, and never `dependency`
+for an infrastructure fault (it re-queues every minute with no counter).
+
 **Name the stage that owns the fix, not just the symptom.** A block is routed by its reason, so
 "IMAGE stage: hero is a 5.4MB PNG, rejected 413 on upload — re-render as JPEG under 1MB and attach
 to post_id 5124" gets fixed automatically, while "upload failed" stalls until a human reads it.
@@ -75,7 +85,9 @@ Practical limits, all of which bite in real use:
 
 ## Hard limits
 
-- **Never publish anything live and never schedule social to go live.** Drafts only. Publishing is a
-  separate, explicitly human-approved step.
+- **Never publish and never schedule anything without an explicit, PM-relayed human approval for that
+  specific piece.** WordPress: create drafts, publish only on approval. Postiz: drafts are not used — on
+  approval, schedule one post per required platform (Web Intelligenz = Instagram + Facebook + Google Business
+  Profile) and reuse existing ids on rework. Mailchimp: draft campaigns only.
 - Never invent a fact, a statistic, a URL, or a client detail. If you need something you do not have,
   block with `needs_input`.

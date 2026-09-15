@@ -39,7 +39,7 @@ Four cards, each assigned to the profile that owns the stage, each the parent of
 | 1 | `seo` | Primary keyword with real SEMrush AU volume/difficulty, meta title (<=60), meta description (<=160), slug, internal-link targets. Blocks with a swap proposal if nothing is winnable. |
 | 2 | `writer` | The draft: title + HTML-ready body in house voice, internal links placed, ~1,000-1,300 words unless the brief says otherwise. Marks **1-2 in-content image slots** inline as `[[IMAGE: <subject>, aspect 4:3]]` plus the hero brief. |
 | 3 | `producer` | **Hero (16:9)** + each in-content slot image. Renders via Higgsfield at `resolution=2k`, hands off the **WebP `web_url`** (~150KB, web-optimised — never the multi-MB PNG), on-topic, brand palette, no baked-in text. Records real dimensions + byte size + the slot→web_url mapping. |
-| 4 | `publisher` | WordPress **draft** (Yoast fields, existing category, **featured image = hero web_url**), replaces each `[[IMAGE: …]]` marker in the body with its uploaded in-content image, + Postiz social **drafts**. Comments the `edit_link`, `post_id` and preview links. |
+| 4 | `publisher` | WordPress **draft** (Yoast fields, existing category, **featured image = hero web_url**), replaces each `[[IMAGE: …]]` marker in the body with its uploaded in-content image, + (only after approval) Postiz posts for every required platform. Comments the `edit_link`, `post_id` and preview links. |
 
 There is no QA stage — **you are the review gate** (see your SOUL).
 
@@ -67,5 +67,5 @@ create a second draft.
 ## Publish
 
 Only after an explicit human approval. `publisher` calls `wp_publish` on the saved `post_id`, you
-verify it is genuinely live, then arm the social drafts against the live URL and move the task to
+verify it is genuinely live, then schedule the social posts (Instagram + Facebook + Google Business Profile for WI) against the live URL and move the task to
 `completed`.
