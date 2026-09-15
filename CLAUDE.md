@@ -461,8 +461,6 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
 - **`kanban_create(provider=…)` without `model` is rejected** → the card silently bills the agency key. Always pass both.
 - **`deliver: email` must never go on an intake job**: `_preflight_check_delivery` blocks the whole run when the
   platform is reported unconnected; alerts belong in separate no-agent jobs (`intake-health`).
-- **Public Postgres on `0.0.0.0:5432`** is the `reporting` project's database (n8n/Metabase reach it internally as
-  `postgresql`); its proxy log shows internet scanners. Unpublish it in Coolify (open item).
 
 ---
 
@@ -472,7 +470,6 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
   sessions in 10 days). Decision 2026-09-15: redeploy leak-safe — `mailchimp-mcp` 1.2.0 with `MAILCHIMP_TOOLS` limited to
   the 18 allow-listed tools, supergateway `--stateful --sessionTimeout 60000`, `mem_limit 512m`, `pids_limit 64`, real
   healthcheck, 48 h soak; set `LITELLM_MCP_TOOL_LISTING_TIMEOUT=90` on LiteLLM in the same window. Needs Coolify.
-- **Public Postgres 5432** (reporting project) — unpublish in Coolify (`is_public: false`); internal clients use `postgresql`.
 - **LiteLLM agency key rotation** — the inline `pm_comms` bearer is the Coolify-injected `OPENAI_API_KEY`; rotate at the
   next planned hermes-service recreate (also delete the stale `hermes-webui`/`hermes-serve` records and re-run
   `setup-sandbox.sh` step 4), referencing the new value as `${PM_COMMS_KEY}` in `config.yaml`.
