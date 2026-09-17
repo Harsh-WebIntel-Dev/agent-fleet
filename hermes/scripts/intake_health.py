@@ -33,6 +33,14 @@ DISK_PCT = float(os.environ.get("INTAKE_HEALTH_DISK_PCT", "85"))
 SILENT_STREAK = int(os.environ.get("INTAKE_HEALTH_SILENT_STREAK", "3"))
 INTAKE_JOBS = {"12b1e0f820e9": ("marketing-task-sweep", 15), "f3d04e2607f5": ("clickup-chat-intake", 5)}
 MUST_REPORT_JOBS = {"21cb02f87693": "semrush-blog-global-feed"}
+# A genuine failure an intake job surfaces in prose. Kept deliberately tight so a routine
+# "no blocked/triage/todo cards … nothing actionable this tick" reconciliation never matches.
+BLOCKER_MARKERS = (
+    "toolset-not-mounted", "pm-comms-breaker-open", "not a deferrable tool",
+    "not in this run's toolset", "no clickup_", "no `clickup", "cannot read or reply",
+    "could not read", "unable to reach", "honest blocker", "mcp is detached",
+    "tools are not present", "toolset contains no", "\u26d4",
+)
 MEL = timezone(timedelta(hours=10))  # AEST; the fleet runs on Melbourne wall-clock
 
 
@@ -112,6 +120,26 @@ def is_monitor_quiet(path: str) -> bool:
     return "no_change (agent run suppressed)" in read_tail(path, 4000)
 
 
+def _final_token(resp: str) -> str:
+    lines = [ln.strip() for ln in resp.splitlines() if ln.strip()]
+    return lines[-1] if lines else ""
+
+
+def _is_silent(resp: str) -> bool:
+    """Handled/quiet: empty, or the last non-empty line is the [SILENT] marker.
+
+    Webster ends a clean sweep with narration then [SILENT] (or just "nothing actionable"),
+    so exact-equality on the whole body is wrong."""
+    if not resp:
+        return True
+    return _final_token(resp).strip("*`_. ").upper() == "[SILENT]"
+
+
+def _looks_like_blocker(resp: str) -> bool:
+    low = resp.lower()
+    return any(m in low for m in BLOCKER_MARKERS)
+
+
 def gateway_starts_since(ts_iso: str | None) -> list[str]:
     out = []
     for line in read_tail(os.path.join(LOGS, "gateway-exit-diag.log")).splitlines():
@@ -177,13 +205,14 @@ def main() -> int:
                     alerts[f"job-stale-{jid}"] = f"{name} last ran {age:.0f} min ago (schedule every {minutes} min) — is the gateway ticker alive? (cron status)"
             except ValueError:
                 pass
-        # blocker reports: a non-[SILENT] agent response from an intake job
+        # A genuine failure an intake job reported in prose (deliver: local, otherwise invisible).
+        # NOT a routine "nothing actionable … [SILENT]" reconciliation — that is the job working.
         for f in latest_outputs(jid, 1):
-            if is_monitor_quiet(f):
+            if is_monitor_quiet(f) or _is_silent(response_of(f)):
                 continue
             resp = response_of(f)
-            if resp and resp != "[SILENT]":
-                alerts[f"blocker-{jid}-{os.path.basename(f)}"] = f"{name} reported instead of [SILENT] ({os.path.basename(f)}):\n    " + resp[:600].replace("\n", "\n    ")
+            if _looks_like_blocker(resp):
+                alerts[f"blocker-{jid}"] = f"{name} reported a blocker ({os.path.basename(f)}):\n    " + resp[:600].replace("\n", "\n    ")
     # 3. chat monitor errors
     for f in latest_outputs("f3d04e2607f5", 1):
         head = read_tail(f, 6000)
@@ -192,7 +221,7 @@ def main() -> int:
     # 4. silent-when-broken
     for jid, name in MUST_REPORT_JOBS.items():
         files = latest_outputs(jid, SILENT_STREAK)
-        if len(files) >= SILENT_STREAK and all(response_of(f) == "[SILENT]" for f in files):
+        if len(files) >= SILENT_STREAK and all(_is_silent(response_of(f)) for f in files):
             alerts[f"silent-{jid}"] = f"{name} has replied bare [SILENT] on its last {len(files)} runs (newest {os.path.basename(files[0])}) — check firecrawl/web_extract and the feed."
     # 5. gateway restarts
     starts = gateway_starts_since(state.get("last_gateway_event_ts"))
@@ -220,7 +249,8 @@ def main() -> int:
 
     # state-change logic: alert on new keys, note recoveries, stay silent otherwise
     new = {k: v for k, v in alerts.items() if k not in prev}
-    recovered = [k for k in prev if k not in alerts]
+    # gateway-restart is a point-in-time event, not a condition — it never "recovers".
+    recovered = [k for k in prev if k not in alerts and k != "gateway-restart"]
     lines: list[str] = []
     if new:
         lines.append("ALERTS")
