@@ -1,0 +1,10 @@
+name: mcp-floor
+description: >
+  Guard against a partial MCP registration surviving forever. After a gateway (re)start during a
+  DNS/egress blip the pm_comms aggregate can register only the docker-network sidecars (32 tools on
+  2026-09-12) and Hermes never re-lists a server that connected successfully-but-partially. This hook
+  compares the live registry with a cheap LiteLLM probe and re-runs discovery when the registry is
+  below the floor and LiteLLM can do better. Rate-limited; writes ~/.hermes/mcp_floor_status.json.
+events:
+  - gateway:startup
+  - agent:start

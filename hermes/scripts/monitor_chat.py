@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""STABLE fingerprint of the AI Agent's ClickUp chat: one line per DM/GROUP_DM with the id of the
-newest INBOUND message. Unchanged => the PM run is suppressed (zero tokens on a quiet tick).
+"""STABLE fingerprint of the AI Agent's ClickUp chat: one line per DM/GROUP_DM/CHANNEL with the id of
+the newest INBOUND message (for GROUP_DM and public CHANNEL: the newest message that @mentions the bot). Unchanged => the PM run is suppressed (zero tokens on a quiet tick).
 
 WHY THE FINGERPRINT IS THE LAST INBOUND ID, NOT THE LAST ACTIVITY TIMESTAMP
 ---------------------------------------------------------------------------
@@ -33,7 +33,7 @@ import os, sys, json, urllib.request, urllib.error, urllib.parse
 
 BASE = "https://api.clickup.com/api"
 BOT  = "106813628"                       # Webster
-WANTED_TYPES = ("DM", "GROUP_DM")        # CHANNEL (public rooms) deliberately excluded
+WANTED_TYPES = ("DM", "GROUP_DM", "CHANNEL")  # public CHANNELs wake only on an @mention (see is_actionable)
 MAX_PAGES = 10                           # bounded: a runaway pager must not burn the budget
 SCAN_DEPTH = 20                          # messages to scan back when looking for newest inbound
 
@@ -111,7 +111,7 @@ def is_actionable(msg: dict, ctype: str) -> bool:
     from the old chat bridge, so Webster does not wake for every line of a group conversation."""
     if str(msg.get("user_id")) == BOT:
         return False
-    if ctype == "GROUP_DM":
+    if ctype in ("GROUP_DM", "CHANNEL"):
         return BOT in str(msg.get("content") or "")
     return True
 

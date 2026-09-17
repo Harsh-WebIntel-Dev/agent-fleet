@@ -1,7 +1,7 @@
 # CLAUDE.md — Agent Fleet
 
 Guidance for Claude Code (and humans) working in this repo. This documents the **current, deployed**
-system as of **2026-09-03**. Where an older subfolder README disagrees (e.g. `hermes/README.md` still
+system as of **2026-09-15**. Where an older subfolder README disagrees (e.g. `hermes/README.md` still
 describes an "OpenClaw does the work" model), **this file is the authority** — the live system is the
 Hermes-native fleet below.
 
@@ -102,8 +102,8 @@ mechanism*, never the individual task.
 
 This is the heart of the system — the discipline in Webster's SOUL.
 
-**Access.** Any ClickUp-workspace member can reach him: a 1:1 DM, an @mention in a group
-(`@webster` / `#user_mention#106813628`), a task assigned to bot `106813628`, or an email to
+**Access.** Any ClickUp-workspace member can reach him: a 1:1 DM, an @mention in a GROUP_DM or a public CHANNEL
+(`@webster` / `#user_mention#106813628`; the chat monitor covers public channels since 2026-09-15), a task assigned to bot `106813628`, or an email to
 **technology@webintelligenz.com**. No per-user allowlist for chat/tasks; email has an
 SPF/DKIM/DMARC-verified sender allowlist (WI team only).
 
@@ -116,8 +116,9 @@ client="<slug>")` — *recorded evidence only, never a vibe*. Missing anything �
 brand-new client (`memory_search` → "unknown client") is registered with `memory_register_client`.
 
 **2 — Per-client budget billing.** Each onboarded client has its own LiteLLM key + monthly budget.
-Webster sets **`provider="litellm-<slug>"` + `tenant="<slug>"`** on every `kanban_create` so the
-specialist runs on that client's key. Slugs: `biogone`, `pride-advice`, `radiance-wealth`; Web
+Webster sets **`provider="litellm-<slug>"` + `model="standard"` + `tenant="<slug>"`** on every `kanban_create` so the
+specialist runs on that client's key (`kanban_create` **rejects `provider` without `model`** — until 2026-09-15 every client
+card silently billed the agency key). Slugs: `biogone`, `pride-advice`, `radiance-wealth`; Web
 Intelligenz's own work uses the default (`litellm` key — omit `provider`). Never guess a slug (a wrong
 one silently mis-bills another client). **WordPress is NOT yet per-client** — the shared WP connects
 only to webintelligenz.com, so a client's WP *publishing* is held until per-client WP is wired
@@ -125,7 +126,10 @@ only to webintelligenz.com, so a client's WP *publishing* is held until per-clie
 
 **3 — Compose → dispatch.** He builds a dependency-chained set of kanban cards (only the stages the
 task needs), each carrying the ClickUp `task_id`, a stage brief in his words, and "read the task +
-comments first". Build the graph with `kanban decompose` where possible; verify parent links. The
+comments first". Build the graph with explicit `kanban_create(parents=[…], idempotency_key="clickup:<task_id>:<stage>:c<N>",
+max_runtime_seconds=…)` calls and titles `[<task_id>] <stage> — <topic> (c<N>)` — **never `kanban decompose`**
+(broken under profile multiplexing; `kanban.auto_decompose: false` since 2026-09-15) and never `triage=true`; verify
+parent links with `kanban_show`. The
 dispatcher runs each specialist when its parents are `done`. Then he tells the person it's with the
 team and stops. (The dispatcher runs in the gateway every 60s; concurrency is capped at **4 cards
 in progress fleet-wide, 1 per specialist** — `kanban:` in config.)
@@ -133,6 +137,9 @@ in progress fleet-wide, 1 per specialist** — `kanban:` in config.)
 **4 — The review gate is Webster's — there is NO QA agent.** Nothing reaches a human until he has:
    1. **Re-fetched every artefact himself** (`wp_get_post`, hero URL, Postiz preview) — a specialist's
       claim is NOT evidence (the fleet has reported fabricated post ids / invented URLs).
+      **Platform slate:** `postiz_list` must show one queued post per required platform (WI = IG + FB + GBP) per
+      piece, each with an image; IG grid tiles keep all type inside the **175 px (350 px @2×) safe inset** and the
+      3:4 grid crop is QA-rendered. Missing platform → block to publisher, never `in review`.
    2. Checked it against **brief + brand kit** (house voice, Australian English, two-word brand-name
       rule, logo/colours, claims/compliance) and **compliance** (no absolute/unverifiable claims, no
       phone numbers in Google Business posts).
@@ -156,7 +163,9 @@ volume, post id, char count) that didn't come from a tool call he made this run.
 producer; voice/length/CTA/factual → writer; keyword/meta/slug → seo; unsourced claim → researcher.
 Re-running an upstream stage does NOT re-flow the ones below — reset the stage **and every descendant**
 with an explicit "REDO … produce X differently" (or the stage sees the old artefact and declares
-itself done). Bounded to **2 automatic rework cycles**, then a loud stop + escalate to reviewers.
+itself done). Bounded by the board itself: **one unblock per card per block kind** (`BLOCK_RECURRENCE_LIMIT=2`); a second
+same-kind block sends the card to `triage`, which only `hermes kanban archive` clears — so one rework, then a loud stop
+(one comment, once) + escalate to reviewers.
 
 **7 — Relay decisions; publishing is human-gated, always.** `in review` is NOT approval. On
 **approved** → publisher publishes against the **existing** draft (reuse ids, never a second one),
@@ -343,10 +352,11 @@ The in-process scheduler runs in `hermes-agent`; jobs in `cron/jobs.json`; manag
 
 | Job | id | Schedule | What |
 |---|---|---|---|
-| `marketing-task-sweep` | `12b1e0f820e9` | 15m | **MCP-only** (no gate): Webster lists his actionable ClickUp tasks himself and composes/reviews. |
-| `clickup-chat-intake` | `f3d04e2607f5` | 5m | `monitor_chat.py` gate → reads the changed channel; DM = answer all, group = only if @tagged. |
-| `semrush-blog-global-feed` | `21cb02f87693` | 07:00 | Ingest SEMrush blog → global memory + Spaces `clients/global/semrush-feed.md`. |
-| `review-notify` | `415989b00956` | 15m | Emails reviewers "ready for review". **Currently failing** ("email has no gateway credentials") — email platform is enabled but the cron's `deliver: email` SMTP creds are not loaded; verify before relying on it. |
+| `marketing-task-sweep` | `12b1e0f820e9` | 15m | **MCP-only** (no gate): board reconciliation first, then Webster lists his actionable ClickUp tasks and composes/reviews. Ends `[SILENT]` unless blocked (RUN CONTRACT). Webster self-paused it 09-13→09-15 when his tools vanished (§15). |
+| `clickup-chat-intake` | `f3d04e2607f5` | 5m | `monitor_chat.py` gate (DM, GROUP_DM **and public CHANNEL**) → reads the changed channel; DM = answer every unanswered human message, group/channel = only if @tagged. Ends `[SILENT]` unless blocked. |
+| `semrush-blog-global-feed` | `21cb02f87693` | 07:00 | Ingest SEMrush blog → global memory + Spaces `clients/global/semrush-feed.md` (de-dup against that file; a fetch failure must be reported, never `[SILENT]`). |
+| `review-notify` | `415989b00956` | 15m | Emails all four reviewers "ready for review" (`monitor_review.py` gate). Was intermittently false-blocked by the delivery preflight after IMAP timeouts → `cron.preflight: false` since 2026-09-15. |
+| `intake-health` | `973701913ef0` | */30 | **No-LLM watchdog** (`scripts/intake_health.py`) → email Harsh only when something is wrong: registered tools < 100, a job paused/failing/stale, a gateway restart, a non-`[SILENT]` intake report (= a blocker), a `[SILENT]` streak from the SEMrush feed, LiteLLM 429s, swap/disk. Weekly self-test line on Mondays. |
 
 **Monitor-gate pattern:** a job may name a `monitor_script`/`monitor_url`; Hermes runs it each tick and
 wakes the LLM only when its output hash **changes**. The task-sweep deliberately has **no** gate; the
@@ -355,7 +365,11 @@ chat intake keeps its gate because it does real channel-routing, not just cost-g
 **⚠️ Cron traps:** (a) a killed/`timeout`-wrapped `hermes cron run` can baseline-without-processing and
 stick "no change" — never wrap it in `timeout`. (b) A cron's first tick fired inside the webui session
 that created it records a **false** `failed` ledger status — re-run it standalone with `hermes cron run
-<id>` to prove/reset.
+<id>` to prove/reset. (c) `hermes cron run` does **not** bypass a monitor gate and `--monitor-script` edits do not
+reset `monitor_state`; to replay a detected-but-unhandled change, back up `jobs.json` then clear the baseline via the cron
+store API (`from cron.jobs import update_job; update_job(<id>, {"monitor_state": None})`) — the next tick runs the job's
+own prompt with a first-run baseline block. (d) `hermes cron create --script` refuses a script whose text contains a
+gateway lifecycle command (e.g. the literal `hermes gateway restart`) — phrase operator advice without it.
 
 ---
 
@@ -396,12 +410,19 @@ drops it). Never connect the webui to the sandbox's own network (breaks Traefik 
 
 - **SOUL edits:** read the **live** file, keep a dated `.bak-*`, edit, stream back as `hermes`, `diff`.
   Read per-turn → **no restart**.
-- **MCP tool / `config.yaml` / model changes:** clear `cache/mcp_schema_cache.json` +
-  `tool_discovery_cache.json` (main **and** `profiles/*/cache/`) and **restart both** hermes containers
-  — each process caches tool schemas independently.
+- **MCP tool / `config.yaml` / model changes:** the on-disk `mcp_schema_cache.json` is **not** consulted for
+  `pm_comms` (it is not `lazy:` and LiteLLM sends `ttl_ms: 0`); what pins tools is the **in-process registry** of the
+  gateway (and, separately, of the dashboard process). Apply MCP config edits with a `hermes gateway restart` (slot)
+  in a quiet window; kanban workers discover fresh per dispatch.
 - **Restart vs redeploy:** `docker restart -t 30 <agent> <webui>` preserves volumes + the sandbox link;
   a Coolify **redeploy recreates** the container → drops the sandbox link (re-run `setup-sandbox.sh`).
   Restart only in a **quiet window** (`hermes cron runs` shows nothing in-flight).
+- **Gateway restart = `hermes gateway restart` inside the container** (s6 slot `gateway-default` only; keeps the
+  dashboard slot, A2A and the sandbox link). Never `docker restart` for a tool re-discovery — it kills the dashboard
+  process and any running specialist (kanban workers are child processes of the gateway; check
+  `hermes kanban list --status running` first). After any restart confirm `MCP: registered N tool(s)` equals the LiteLLM
+  `/mcp-rest/tools/list` count + 4 utility tools (117 on 2026-09-15). The `hooks/mcp-floor` hook re-runs discovery
+  automatically when N < 100 and LiteLLM lists more; its verdicts are in `~/.hermes/mcp_floor_status.json`.
 - **Hard rules:** explain state-changing actions **before** doing them; never touch a running process
   to "nudge" it; never put yourself in the middle of Webster's autonomous flow; treat Webster as a peer
   LLM.
@@ -430,17 +451,34 @@ secrets store is self-hosted **Infisical** — see §6 for its access, auth, and
 - `hermes-agent` upgrades past `v0.19.0 (2026.7.20)` crash-loop the webui (wheel-install guard) — pin
   deliberately; deployed agent is `v2026.8.18`.
 - prod-2 load is largely hypervisor **CPU steal**, not fleet workload — removing services won't fix it.
+- **A gateway (re)start during a DNS/egress outage registers only the docker-network sidecars** (32 tools on
+  2026-09-12: ClickUp, Semrush and built-in Postiz missing) and Hermes **never re-lists a server that connected
+  successfully-but-partially** (only parked/failed servers are retried). Webster ran blind for 3 days and paused his own
+  sweep. Per-process signal: `Job '<id>': N MCP tool(s) available` in `agent.log` (gateway-only logger; `agent.log` is
+  shared with the dashboard process and carries no PID). Fix: slot restart (§13); guard: `hooks/mcp-floor`.
+- **`kanban decompose` / auto-decompose is broken under `multiplex_profiles`** (`get_secret('OPENAI_API_KEY')` has no
+  profile secret scope) → `kanban.auto_decompose: false`; a `triage` card can only be archived.
+- **`kanban_create(provider=…)` without `model` is rejected** → the card silently bills the agency key. Always pass both.
+- **`deliver: email` must never go on an intake job**: `_preflight_check_delivery` blocks the whole run when the
+  platform is reported unconnected; alerts belong in separate no-agent jobs (`intake-health`).
 
 ---
 
 ## 16. Open items
 
-- **Mailchimp key** — MCP built/wired/scoped (draft-only, WI-only) but **blocked** on staging
-  `MAILCHIMP_API_KEY` into Infisical `/shared` (needs an admin token).
-- **review-notify email delivery** — failing ("no gateway credentials"); verify the email platform's
-  SMTP creds are loaded.
-- **Per-client WordPress** — client keys can't publish to their own sites yet; client WP publishing is
-  held until wired.
+- **mailchimp redeploy** — the container was stopped by hand ~09-10 and LiteLLM still lists it (11,778 failed
+  sessions in 10 days). Decision 2026-09-15: redeploy leak-safe — `mailchimp-mcp` 1.2.0 with `MAILCHIMP_TOOLS` limited to
+  the 18 allow-listed tools, supergateway `--stateful --sessionTimeout 60000`, `mem_limit 512m`, `pids_limit 64`, real
+  healthcheck, 48 h soak; set `LITELLM_MCP_TOOL_LISTING_TIMEOUT=90` on LiteLLM in the same window. Needs Coolify.
+- **LiteLLM agency key rotation** — the inline `pm_comms` bearer is the Coolify-injected `OPENAI_API_KEY`; rotate at the
+  next planned hermes-service recreate (also delete the stale `hermes-webui`/`hermes-serve` records and re-run
+  `setup-sandbox.sh` step 4), referencing the new value as `${PM_COMMS_KEY}` in `config.yaml`.
+- **Cloudflare (approved scope)** — off-box monitor Worker + R2 dead-man heartbeat (`cloudflare/fleet-monitor/`,
+  `hermes/scripts/heartbeat.py`) and Browser Rendering for `render-card`/`qa-shot`; deploy needs `wrangler login`.
+- **Firecrawl `REDIS_URL` alias collision** — API down; the SEMrush feed and researcher `web_extract` fail silently.
+- **Per-client WordPress** — client keys can't publish to their own sites yet; client WP publishing is held until wired.
+- **Token cost** — a Webster wake costs 0.1–1.7 M prompt tokens on `standard` (`cron/usage_audit.jsonl`); trim the
+  skills snapshot, `allowed_tools` on ClickUp, no `list_prompts`/`list_resources` in cron prompts.
 
 ---
 

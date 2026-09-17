@@ -11,6 +11,7 @@
 
 # ── Default model ─────────────────────────────────────────────────────
 # DECISION (user, 2026-08-19): webintelligenz's Hermes runs on deepseek flash.
+# SUPERSEDED (Harsh, 2026-09-04): the live default is `standard` (DeepSeek V4 Pro) for all six profiles.
 #
 # These two top-level keys are what Hermes actually reads for its default (config.get("model") /
 # config.get("provider")). model_aliases below are NOT a default — they are named shortcuts. With
@@ -22,7 +23,7 @@
 #
 # Verified live via LiteLLM spend logs: model deepseek-v4-flash-0731, team client-webintelligenz,
 # real non-zero spend — so the model, the per-client attribution and the budget path all hold.
-model: flash
+model: standard
 provider: litellm
 
 providers:
@@ -52,3 +53,36 @@ model_aliases:
   hermes-deep:
     model: standard
     provider: litellm
+
+# ── Kanban dispatcher (2026-09-15) ────────────────────────────────────
+kanban:
+  dispatch_in_gateway: true
+  # `kanban decompose` / auto-decompose is broken under gateway.multiplex_profiles
+  # (get_secret('OPENAI_API_KEY') has no profile secret scope) and retried the two triage
+  # parents every 60 s for a week. Webster composes chains with explicit kanban_create calls.
+  auto_decompose: false
+  # Bound a wedged worker (boot-captured; applies at the next gateway start).
+  dispatch_stale_timeout_seconds: 1800
+  dispatch_interval_seconds: 60
+  max_in_progress: 4
+  max_in_progress_per_profile: 1
+
+# ── Cron (2026-09-15) ─────────────────────────────────────────────────
+cron:
+  allow_agent_scheduling: true
+  # The pre-dispatch delivery check false-blocked review-notify ("email has no gateway
+  # credentials", 09-14 19:36 / 19:52). All LLM jobs deliver to local (never checked), so
+  # preflight only ever gated the no-agent email alert jobs — where a false block is worst-case.
+  preflight: false
+
+# ── Email platform: operator slash commands (2026-09-15) ──────────────
+# Without allow_admin_from, EVERY allowlisted sender could run every gateway slash command
+# (/reload-mcp, /restart ...) by email. Only the fleet operator is an admin; other team senders
+# still talk to Webster normally but get no slash commands.
+#gateway:
+#  platforms:
+#    email:
+#      enabled: true
+#      extra:
+#        allow_admin_from: [harsh@webintelligenz.com]
+#        user_allowed_commands: []
